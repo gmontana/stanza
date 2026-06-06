@@ -18,6 +18,7 @@ pub const readable = backend.readable;
 pub const isTty = backend.isTty;
 pub const openRead = backend.openRead;
 pub const openWriteTrunc = backend.openWriteTrunc;
+pub const openAppend = backend.openAppend;
 pub const devNull = backend.devNull;
 pub const installResize = backend.installResize;
 pub const resized = backend.resized;

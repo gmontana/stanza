@@ -164,6 +164,13 @@ pub fn openWriteTrunc(path: []const u8, mode: u32) !Fd {
     return posix.openat(posix.AT.FDCWD, path, flags, @intCast(mode));
 }
 
+/// Open for appending; O_APPEND makes concurrent writers interleave whole
+/// writes instead of clobbering each other.
+pub fn openAppend(path: []const u8, mode: u32) !Fd {
+    const flags: posix.O = .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true };
+    return posix.openat(posix.AT.FDCWD, path, flags, @intCast(mode));
+}
+
 pub fn devNull() !Fd {
     return posix.openat(posix.AT.FDCWD, "/dev/null", .{ .ACCMODE = .RDWR }, 0);
 }

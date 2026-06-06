@@ -415,6 +415,35 @@ pub fn openWriteTrunc(path: []const u8, mode: u32) !Fd {
     return file.handle;
 }
 
+/// Open for appending. FILE_APPEND_DATA gives atomic end-of-file writes, the
+/// closest Windows equivalent of O_APPEND.
+pub fn openAppend(path: []const u8, mode: u32) !Fd {
+    _ = mode;
+    // SAFETY: utf8ToUtf16Le writes `n` code units before they are read.
+    var wide: [4096]u16 = undefined;
+    const n = std.unicode.utf8ToUtf16Le(&wide, path) catch return error.BadPathName;
+    if (n >= wide.len) return error.NameTooLong;
+    wide[n] = 0;
+    const FILE_APPEND_DATA: DWORD = 0x0004;
+    const SYNCHRONIZE: DWORD = 0x00100000;
+    const OPEN_ALWAYS: DWORD = 4;
+    const h = CreateFileW(
+        wide[0..n :0],
+        FILE_APPEND_DATA | SYNCHRONIZE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        null,
+        OPEN_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        null,
+    );
+    if (h != invalid) return h;
+    return switch (windows.GetLastError()) {
+        .FILE_NOT_FOUND, .PATH_NOT_FOUND => error.FileNotFound,
+        .ACCESS_DENIED => error.AccessDenied,
+        else => error.InputOutput,
+    };
+}
+
 pub fn devNull() !Fd {
     return openConsole("NUL");
 }

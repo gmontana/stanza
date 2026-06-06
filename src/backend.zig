@@ -25,6 +25,7 @@ pub const readable = impl.readable;
 pub const isTty = impl.isTty;
 pub const openRead = impl.openRead;
 pub const openWriteTrunc = impl.openWriteTrunc;
+pub const openAppend = impl.openAppend;
 pub const devNull = impl.devNull;
 pub const installResize = impl.installResize;
 pub const resized = impl.resized;

@@ -11,6 +11,8 @@ pub const History = struct {
     items: std.ArrayList([]u8) = .empty,
     max: usize,
     alloc: std.mem.Allocator,
+    /// How many leading entries are already persisted (see `appendNew`).
+    synced: usize = 0,
 
     pub fn init(alloc: std.mem.Allocator, max: usize) History {
         return .{ .alloc = alloc, .max = if (max == 0) 1 else max };
@@ -38,7 +40,19 @@ pub const History = struct {
         try self.items.append(self.alloc, dup);
         // O(n) shift per eviction — deliberate; fine at the ~1000-entry caps
         // history runs at, and it keeps the storage a plain list.
-        if (self.items.items.len > self.max) self.alloc.free(self.items.orderedRemove(0));
+        if (self.items.items.len > self.max) self.evictOldest();
+    }
+
+    fn evictOldest(self: *History) void {
+        self.alloc.free(self.items.orderedRemove(0));
+        self.synced -|= 1; // the persisted watermark shifted down with it
+    }
+
+    /// Change the retention cap at runtime, evicting the oldest entries if
+    /// the history already exceeds it.
+    pub fn setMax(self: *History, max: usize) void {
+        self.max = if (max == 0) 1 else max;
+        while (self.items.items.len > self.max) self.evictOldest();
     }
 
     /// Index of the most recent entry containing `term`, searching strictly
@@ -66,16 +80,34 @@ pub const History = struct {
         try sys.readToEnd(fd, self.alloc, &buf);
         var it = std.mem.splitScalar(u8, buf.items, '\n');
         while (it.next()) |line| try self.add(line);
+        self.synced = self.items.items.len;
     }
 
     /// Write all entries to `path`, newline-delimited, creating or truncating.
-    pub fn save(self: *const History, path: []const u8) !void {
+    /// Note this clobbers entries another instance appended meanwhile; use
+    /// `appendNew` when several instances share one history file.
+    pub fn save(self: *History, path: []const u8) !void {
         const fd = try sys.openWriteTrunc(path, 0o600);
         defer sys.close(fd);
         for (self.items.items) |e| {
             try sys.writeAll(fd, e);
             try sys.writeAll(fd, "\n");
         }
+        self.synced = self.items.items.len;
+    }
+
+    /// Append only the entries added since the last `load`/`save`/`appendNew`
+    /// to `path`. Appends are atomic at the OS level, so concurrent instances
+    /// sharing one history file interleave instead of overwriting each other.
+    pub fn appendNew(self: *History, path: []const u8) !void {
+        if (self.synced >= self.items.items.len) return;
+        const fd = try sys.openAppend(path, 0o600);
+        defer sys.close(fd);
+        for (self.items.items[self.synced..]) |e| {
+            try sys.writeAll(fd, e);
+            try sys.writeAll(fd, "\n");
+        }
+        self.synced = self.items.items.len;
     }
 
     fn lastEquals(self: *const History, entry: []const u8) bool {
@@ -114,6 +146,48 @@ test "load propagates real errors instead of masking them" {
     try std.testing.expectEqual(@as(usize, 0), h.len());
     // A directory opens but cannot be read; the error must surface.
     try std.testing.expectError(error.IsDir, h.load("."));
+}
+
+test "appendNew interleaves entries from two instances" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [128]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, ".zig-cache/tmp/{s}/shared", .{tmp.sub_path});
+
+    var a = History.init(std.testing.allocator, 100);
+    defer a.deinit();
+    var b = History.init(std.testing.allocator, 100);
+    defer b.deinit();
+    try a.add("a1");
+    try a.appendNew(path);
+    try b.add("b1");
+    try b.appendNew(path);
+    try a.add("a2");
+    try a.appendNew(path); // must not rewrite a1 or clobber b1
+    try a.appendNew(path); // nothing new: a no-op
+
+    var merged = History.init(std.testing.allocator, 100);
+    defer merged.deinit();
+    try merged.load(path);
+    try std.testing.expectEqual(@as(usize, 3), merged.len());
+    try std.testing.expectEqualStrings("a1", merged.at(0));
+    try std.testing.expectEqualStrings("b1", merged.at(1));
+    try std.testing.expectEqualStrings("a2", merged.at(2));
+}
+
+test "setMax evicts oldest and the synced watermark follows" {
+    var h = History.init(std.testing.allocator, 10);
+    defer h.deinit();
+    try h.add("one");
+    try h.add("two");
+    try h.add("three");
+    h.synced = 2; // as if one+two were already persisted
+    h.setMax(2); // evicts "one"
+    try std.testing.expectEqual(@as(usize, 2), h.len());
+    try std.testing.expectEqualStrings("two", h.at(0));
+    try std.testing.expectEqual(@as(usize, 1), h.synced); // shifted with it
+    h.setMax(1); // evicts "two"
+    try std.testing.expectEqual(@as(usize, 0), h.synced);
 }
 
 test "save and load round-trips entries" {
