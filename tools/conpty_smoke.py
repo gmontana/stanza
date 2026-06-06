@@ -297,6 +297,7 @@ def main() -> int:
         cp.wait_for("git")
         cp.send(b"com\t")
         cp.send(b"\r")
+        cp.send(b"status\r")
         cp.send(b"\x12")
         cp.send(b"com")
         cp.send(b"\r")
@@ -315,14 +316,14 @@ def main() -> int:
 
         text = bytes(cp.buf).decode("utf-8", "replace")
         history = HIST.read_text(encoding="utf-8").splitlines() if HIST.exists() else []
-        expected_history = ["commit", "commit", "world", "bar", "quit"]
+        expected_history = ["commit", "status", "commit", "world", "bar", "quit"]
         checks = {
             "completion renders commit": "commit" in text,
             "typed commit submitted": len(history) >= 1 and history[0] == "commit",
             "reverse search prompt shown": "reverse-i-search" in text,
-            "commit recalled via Ctrl-R": len(history) >= 2 and history[1] == "commit",
-            "vi I inserts at start": len(history) >= 3 and history[2] == "world",
-            "vi dw deletes word": len(history) >= 4 and history[3] == "bar",
+            "commit recalled via Ctrl-R": len(history) >= 3 and history[2] == "commit",
+            "vi I inserts at start": len(history) >= 4 and history[3] == "world",
+            "vi dw deletes word": len(history) >= 5 and history[4] == "bar",
             "clean exit": history == expected_history,
         }
         for name, passed in checks.items():
