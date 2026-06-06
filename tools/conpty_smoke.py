@@ -192,7 +192,7 @@ class Conpty:
                 cmd,
                 None,
                 None,
-                False,
+                True,
                 flags,
                 None,
                 None,
