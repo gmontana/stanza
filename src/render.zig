@@ -309,6 +309,59 @@ const TestBufs = struct {
     }
 };
 
+fn fuzzBuild(_: void, smith: *std.testing.Smith) !void {
+    const a = std.testing.allocator;
+    var b = TestBufs{};
+    defer b.deinit(a);
+    var text: [300]u8 = undefined;
+    const n = smith.sliceWithHash(&text, 0);
+    const cols: usize = smith.valueRangeAtMostWithHash(u32, 1, 200, 1);
+    const args = DrawArgs{
+        .cols = cols,
+        .alloc = a,
+        .out = &b.out,
+        .glyphs = &b.glyphs,
+        .paint_buf = &b.paint,
+        .prompt = "> ",
+        .text = text[0..n],
+        .cursor = n,
+        .cfg = .{},
+    };
+    try build(args); // properties: no panic, no overflow on any byte soup
+    var row: usize = 0;
+    try buildMulti(args, &row);
+}
+
+test "fuzz: rendering survives arbitrary text and widths" {
+    try std.testing.fuzz({}, fuzzBuild, .{ .corpus = &.{
+        "\xff\xfe\xc3plain 世界 \x1b[31m",
+        "exactly-ten",
+    } });
+}
+
+fn renderOps(alloc: std.mem.Allocator) !void {
+    var b = TestBufs{};
+    defer b.deinit(alloc);
+    const args = DrawArgs{
+        .cols = 10,
+        .alloc = alloc,
+        .out = &b.out,
+        .glyphs = &b.glyphs,
+        .paint_buf = &b.paint,
+        .prompt = "> ",
+        .text = "hello world wrap",
+        .cursor = 16,
+        .cfg = .{},
+    };
+    try build(args);
+    var row: usize = 0;
+    try buildMulti(args, &row);
+}
+
+test "allocation failures leave no leaks behind" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, renderOps, .{});
+}
+
 test "prompt width skips CSI and OSC escape sequences" {
     try std.testing.expectEqual(@as(usize, 2), promptWidth("\x1b[1;32m> \x1b[0m"));
     // OSC 8 hyperlink (ST-terminated) around "link", then "> "

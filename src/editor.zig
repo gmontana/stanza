@@ -772,6 +772,46 @@ test "bracketed paste inserts sanitized text" {
     try std.testing.expectEqualStrings("a b\tc", ed.line.text());
 }
 
+fn fuzzPaste(_: void, smith: *std.testing.Smith) !void {
+    var ed = Editor.initFd(std.testing.allocator, .{}, sys.invalid, sys.invalid);
+    defer ed.deinit();
+    var bytes: [512]u8 = undefined;
+    const n = smith.sliceWithHash(&bytes, 0);
+    ed.startPaste();
+    for (bytes[0..n]) |b| {
+        if (try ed.stepPaste(b)) break;
+    }
+    try ed.flushPrefix();
+    // Property: nothing unsanitized ever reaches the paste buffer — no
+    // control bytes (except tab), no DEL, and ESC never survives raw.
+    for (ed.paste_buf.items) |b| {
+        try std.testing.expect(b == '\t' or (b >= 0x20 and b != 0x7f));
+    }
+}
+
+test "fuzz: paste sanitization holds for arbitrary input" {
+    try std.testing.fuzz({}, fuzzPaste, .{ .corpus = &.{
+        "x\x1by\x1b\x1b[201~tail",
+        "\r\n\t\x00\x7f\x1b[20",
+        "\x1b[201\x1b[201~",
+    } });
+}
+
+fn editorOps(alloc: std.mem.Allocator) !void {
+    var ed = Editor.initFd(alloc, .{}, sys.invalid, sys.invalid);
+    defer ed.deinit();
+    try typeText(&ed, "hello world");
+    _ = try ed.apply(.kill_word_back);
+    _ = try ed.apply(.yank);
+    try ed.history.add("one");
+    _ = try ed.apply(.up); // stashes the draft
+    _ = try ed.apply(.down); // restores it
+}
+
+test "allocation failures leave no leaks behind" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, editorOps, .{});
+}
+
 test "paste strips ESC bytes and still finds an end marker right after one" {
     const dn = try sys.devNull();
     defer sys.close(dn);

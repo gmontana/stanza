@@ -389,6 +389,29 @@ test "decode resolves a lone escape immediately" {
     try std.testing.expect(std.meta.activeTag(esc) == .escape);
 }
 
+fn fuzzDecode(_: void, smith: *std.testing.Smith) !void {
+    var src = Source{ .fd = sys.invalid, .eof = true };
+    const n = smith.sliceWithHash(&src.buf, 0);
+    src.len = n;
+    // Properties: never panics, never blocks (eof short-circuits the Esc
+    // grace), and every decoded key consumed at least one byte.
+    var keys: usize = 0;
+    while (try decode(&src)) |k| {
+        if (std.meta.activeTag(k) == .eof) break;
+        keys += 1;
+        try std.testing.expect(keys <= n);
+    }
+}
+
+test "fuzz: decode terminates on arbitrary byte streams" {
+    try std.testing.fuzz({}, fuzzDecode, .{ .corpus = &.{
+        "\x1b[1;5C\x1b[200~abc\x1b[201~",
+        "\x1b\x1b[A\xc3\xa9\xff\xfe\x1bOZ",
+        "\x1b[99999999999999999999~\x7f\x00",
+        "\x1b[",
+    } });
+}
+
 test "incomplete escape sequences resolve without hanging" {
     const dn = try sys.devNull();
     defer sys.close(dn);

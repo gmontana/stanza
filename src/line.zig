@@ -236,6 +236,25 @@ fn isSpace(b: u8) bool {
     return b == ' ' or b == '\t';
 }
 
+fn lineOps(alloc: std.mem.Allocator) !void {
+    var ln = Line.init(alloc);
+    defer ln.deinit();
+    try ln.setText("hello world");
+    ln.home();
+    ln.wordRight();
+    try ln.killToEnd();
+    try ln.yank();
+    try ln.insert('é');
+    try ln.killWordBack();
+    try ln.yank();
+    ln.transpose();
+    try ln.deleteSpan(0, 2);
+}
+
+test "allocation failures leave no leaks behind" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, lineOps, .{});
+}
+
 test "insert and backspace ascii" {
     var ln = Line.init(std.testing.allocator);
     defer ln.deinit();

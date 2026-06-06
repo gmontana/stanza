@@ -116,6 +116,20 @@ pub const History = struct {
     }
 };
 
+fn historyOps(alloc: std.mem.Allocator) !void {
+    var h = History.init(alloc, 2);
+    defer h.deinit();
+    try h.add("one");
+    try h.add("two");
+    try h.add("three"); // evicts "one"
+    _ = h.searchBack("t", h.len());
+    h.setMax(1); // evicts "two"
+}
+
+test "allocation failures leave no leaks behind" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, historyOps, .{});
+}
+
 test "dedup and cap" {
     var h = History.init(std.testing.allocator, 2);
     defer h.deinit();
