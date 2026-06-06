@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Zig
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=0.16.0
+          os=$(uname -s)
+          arch=$(uname -m)
+          case "$os-$arch" in
+            Linux-x86_64) target=x86_64-linux ;;
+            Linux-aarch64|Linux-arm64) target=aarch64-linux ;;
+            Darwin-x86_64) target=x86_64-macos ;;
+            Darwin-arm64) target=aarch64-macos ;;
+            *) echo "unsupported runner: $os-$arch" >&2; exit 1 ;;
+          esac
+          name="zig-$target-$version"
+          curl -fsSLO "https://ziglang.org/download/$version/$name.tar.xz"
+          tar -xf "$name.tar.xz"
+          echo "$PWD/$name" >> "$GITHUB_PATH"
+      - name: Unit tests
+        run: zig build test
+      - name: Unit tests (ReleaseSafe)
+        run: zig build test -Doptimize=ReleaseSafe
+      - name: Formatting
+        run: zig build qa
+      - name: Build demos
+        run: zig build
+      - name: PTY end-to-end (demo)
+        run: python3 tools/pty_smoke.py
+      - name: PTY end-to-end (event loop)
+        run: python3 tools/pty_async.py

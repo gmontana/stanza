@@ -1,0 +1,5 @@
+.DS_Store
+zig-out/
+.zig-cache/
+.stanza_demo_history
+.stanza_test_*
