@@ -3,9 +3,9 @@
 //!
 //! `prompt` is the whole public surface. On a real terminal it drives raw-mode
 //! editing with completion, hints, highlighting, kill/yank, reverse search, and
-//! bracketed paste; when input or output is not a tty it falls back to a plain
-//! line read so pipelines keep working. The returned slice is owned by the
-//! caller. History is exposed directly so the host can add, load, and save.
+//! bracketed paste; when no terminal is available it falls back to a plain line
+//! read so pipelines keep working. The returned slice is owned by the caller.
+//! History is exposed directly so the host can add, load, and save.
 
 const std = @import("std");
 const config = @import("config.zig");
@@ -52,35 +52,35 @@ pub const Editor = struct {
         idx: ?usize = null,
     };
 
-    /// Result of `editFeed`: a finished line (owned by the caller) or a signal
-    /// that the line is still being edited.
     pub const Step = union(enum) { line: []u8, more };
 
     pub fn init(alloc: std.mem.Allocator, cfg: config.Config) Editor {
-        return initFd(alloc, cfg, sys.stdin(), sys.stdout());
+        return initTerminal(alloc, cfg, Terminal.initDefault());
     }
 
-    /// Like `init` but with explicit descriptors — e.g. open `/dev/tty` to edit
-    /// even when stdin is a pipe, or hand in a PTY for testing.
     pub fn initFd(
         alloc: std.mem.Allocator,
         cfg: config.Config,
         in_fd: sys.Fd,
         out_fd: sys.Fd,
     ) Editor {
+        return initTerminal(alloc, cfg, Terminal.init(in_fd, out_fd));
+    }
+    fn initTerminal(alloc: std.mem.Allocator, cfg: config.Config, tty: Terminal) Editor {
         return .{
             .alloc = alloc,
             .cfg = cfg,
-            .term = Terminal.init(in_fd, out_fd),
+            .term = tty,
             .history = History.init(alloc, cfg.max_history),
             .line = Line.init(alloc),
-            .src = .{ .fd = in_fd },
+            .src = .{ .fd = tty.in },
             .arena = std.heap.ArenaAllocator.init(alloc),
         };
     }
 
     pub fn deinit(self: *Editor) void {
         self.term.disableRaw(); // defensive: restore the tty even if editStop was skipped
+        self.term.closeOwned();
         self.clearSearch();
         self.line.deinit();
         self.history.deinit();

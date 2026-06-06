@@ -112,6 +112,8 @@ fn stdHandle(which: DWORD) Fd {
 pub const Terminal = struct {
     in: Fd,
     out: Fd,
+    owns_in: bool = false,
+    owns_out: bool = false,
     orig_in: ?DWORD = null,
     orig_out: ?DWORD = null,
     orig_cp: ?UINT = null,
@@ -120,6 +122,36 @@ pub const Terminal = struct {
 
     pub fn init(in: Fd, out: Fd) Terminal {
         return .{ .in = in, .out = out };
+    }
+
+    pub fn initDefault() Terminal {
+        var tty = init(stdin(), stdout());
+        if (tty.isTty()) return tty;
+
+        const con_in = openConsole("CONIN$") catch return tty;
+        const con_out = openConsole("CONOUT$") catch {
+            close(con_in);
+            return tty;
+        };
+        if (!isTtyFd(con_in) or !isTtyFd(con_out)) {
+            close(con_in);
+            close(con_out);
+            return tty;
+        }
+
+        return .{
+            .in = con_in,
+            .out = con_out,
+            .owns_in = true,
+            .owns_out = true,
+        };
+    }
+
+    pub fn closeOwned(self: *Terminal) void {
+        if (self.owns_in) close(self.in);
+        if (self.owns_out and self.out != self.in) close(self.out);
+        self.owns_in = false;
+        self.owns_out = false;
     }
 
     pub fn isTty(self: *const Terminal) bool {
@@ -297,15 +329,7 @@ pub fn openWriteTrunc(path: []const u8, mode: u32) !Fd {
 }
 
 pub fn devNull() !Fd {
-    const h = CreateFileW(
-        std.unicode.utf8ToUtf16LeStringLiteral("NUL"),
-        GENERIC_READ | GENERIC_WRITE,
-        FILE_SHARE_READ | FILE_SHARE_WRITE,
-        null,
-        OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL,
-        null,
-    );
+    const h = openDevice("NUL");
     if (h != invalid) return h;
 
     return switch (windows.GetLastError()) {
@@ -313,6 +337,28 @@ pub fn devNull() !Fd {
         .ACCESS_DENIED => error.AccessDenied,
         else => error.InputOutput,
     };
+}
+
+fn openConsole(comptime name: []const u8) !Fd {
+    const h = openDevice(name);
+    if (h != invalid) return h;
+    return switch (windows.GetLastError()) {
+        .FILE_NOT_FOUND, .PATH_NOT_FOUND => error.FileNotFound,
+        .ACCESS_DENIED => error.AccessDenied,
+        else => error.InputOutput,
+    };
+}
+
+fn openDevice(comptime name: []const u8) Fd {
+    return CreateFileW(
+        std.unicode.utf8ToUtf16LeStringLiteral(name),
+        GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        null,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        null,
+    );
 }
 
 pub fn installResize() void {}

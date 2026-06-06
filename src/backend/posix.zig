@@ -29,6 +29,12 @@ pub const Terminal = struct {
         return .{ .in = in, .out = out };
     }
 
+    pub fn initDefault() Terminal {
+        return init(stdin(), stdout());
+    }
+
+    pub fn closeOwned(_: *Terminal) void {}
+
     pub fn isTty(self: *const Terminal) bool {
         return isTtyFd(self.in) and isTtyFd(self.out);
     }
