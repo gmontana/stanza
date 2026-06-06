@@ -33,6 +33,12 @@ const ENABLE_VIRTUAL_TERMINAL_PROCESSING: DWORD = 0x0004;
 
 const WAIT_OBJECT_0: DWORD = 0x00000000;
 const INFINITE: DWORD = 0xffffffff;
+const GENERIC_READ: DWORD = 0x80000000;
+const GENERIC_WRITE: DWORD = 0x40000000;
+const FILE_SHARE_READ: DWORD = 0x00000001;
+const FILE_SHARE_WRITE: DWORD = 0x00000002;
+const OPEN_EXISTING: DWORD = 3;
+const FILE_ATTRIBUTE_NORMAL: DWORD = 0x00000080;
 
 const COORD = extern struct {
     X: SHORT,
@@ -80,6 +86,15 @@ extern "kernel32" fn GetConsoleCP() callconv(.winapi) UINT;
 extern "kernel32" fn SetConsoleCP(wCodePageID: UINT) callconv(.winapi) BOOL;
 extern "kernel32" fn GetConsoleOutputCP() callconv(.winapi) UINT;
 extern "kernel32" fn SetConsoleOutputCP(wCodePageID: UINT) callconv(.winapi) BOOL;
+extern "kernel32" fn CreateFileW(
+    lpFileName: [*:0]const u16,
+    dwDesiredAccess: DWORD,
+    dwShareMode: DWORD,
+    lpSecurityAttributes: ?*anyopaque,
+    dwCreationDisposition: DWORD,
+    dwFlagsAndAttributes: DWORD,
+    hTemplateFile: ?Fd,
+) callconv(.winapi) Fd;
 
 pub fn stdin() Fd {
     return stdHandle(STD_INPUT_HANDLE);
@@ -282,8 +297,22 @@ pub fn openWriteTrunc(path: []const u8, mode: u32) !Fd {
 }
 
 pub fn devNull() !Fd {
-    const file = try std.Io.Dir.cwd().openFile(io(), "NUL", .{ .mode = .read_write });
-    return file.handle;
+    const h = CreateFileW(
+        std.unicode.utf8ToUtf16LeStringLiteral("NUL"),
+        GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        null,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        null,
+    );
+    if (h != invalid) return h;
+
+    return switch (windows.GetLastError()) {
+        .FILE_NOT_FOUND, .PATH_NOT_FOUND => error.FileNotFound,
+        .ACCESS_DENIED => error.AccessDenied,
+        else => error.InputOutput,
+    };
 }
 
 pub fn installResize() void {}
