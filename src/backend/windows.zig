@@ -40,9 +40,41 @@ const FILE_SHARE_WRITE: DWORD = 0x00000002;
 const OPEN_EXISTING: DWORD = 3;
 const FILE_ATTRIBUTE_NORMAL: DWORD = 0x00000080;
 
+const KEY_EVENT: WORD = 0x0001;
+
+// Virtual-key codes for keys that change state but produce no input bytes.
+const VK_SHIFT: WORD = 0x10;
+const VK_CONTROL: WORD = 0x11;
+const VK_MENU: WORD = 0x12;
+const VK_CAPITAL: WORD = 0x14;
+const VK_LWIN: WORD = 0x5b;
+const VK_RWIN: WORD = 0x5c;
+const VK_NUMLOCK: WORD = 0x90;
+const VK_SCROLL: WORD = 0x91;
+
 const COORD = extern struct {
     X: SHORT,
     Y: SHORT,
+};
+
+const KEY_EVENT_RECORD = extern struct {
+    bKeyDown: BOOL,
+    wRepeatCount: WORD,
+    wVirtualKeyCode: WORD,
+    wVirtualScanCode: WORD,
+    uChar: extern union {
+        UnicodeChar: u16,
+        AsciiChar: u8,
+    },
+    dwControlKeyState: DWORD,
+};
+
+const INPUT_RECORD = extern struct {
+    EventType: WORD,
+    Event: extern union {
+        KeyEvent: KEY_EVENT_RECORD,
+        raw: [16]u8, // mouse/focus/menu/resize arms, all <= 16 bytes
+    },
 };
 
 const SMALL_RECT = extern struct {
@@ -82,6 +114,19 @@ extern "kernel32" fn WriteFile(
     lpOverlapped: ?*anyopaque,
 ) callconv(.winapi) BOOL;
 extern "kernel32" fn WaitForSingleObject(hHandle: Fd, dwMilliseconds: DWORD) callconv(.winapi) DWORD;
+extern "kernel32" fn PeekConsoleInputW(
+    hConsoleInput: Fd,
+    lpBuffer: [*]INPUT_RECORD,
+    nLength: DWORD,
+    lpNumberOfEventsRead: *DWORD,
+) callconv(.winapi) BOOL;
+extern "kernel32" fn ReadConsoleInputW(
+    hConsoleInput: Fd,
+    lpBuffer: [*]INPUT_RECORD,
+    nLength: DWORD,
+    lpNumberOfEventsRead: *DWORD,
+) callconv(.winapi) BOOL;
+extern "kernel32" fn GetTickCount64() callconv(.winapi) u64;
 extern "kernel32" fn GetConsoleCP() callconv(.winapi) UINT;
 extern "kernel32" fn SetConsoleCP(wCodePageID: UINT) callconv(.winapi) BOOL;
 extern "kernel32" fn GetConsoleOutputCP() callconv(.winapi) UINT;
@@ -293,8 +338,51 @@ pub fn close(fd: Fd) void {
 
 pub fn readable(fd: Fd, ms: i32) bool {
     if (fd == invalid) return false;
-    const timeout: DWORD = if (ms < 0) INFINITE else @intCast(ms);
-    return WaitForSingleObject(fd, timeout) == WAIT_OBJECT_0;
+    var mode: DWORD = 0;
+    if (!GetConsoleMode(fd, &mode).toBool()) {
+        // Pipes/files: the handle is signaled exactly when a read can proceed.
+        const timeout: DWORD = if (ms < 0) INFINITE else @intCast(ms);
+        return WaitForSingleObject(fd, timeout) == WAIT_OBJECT_0;
+    }
+    return consoleReadable(fd, ms);
+}
+
+/// A console input handle is signaled by ANY pending record — including key
+/// releases and bare modifier presses that translate to no bytes, which
+/// would make the next ReadFile block. Peek the queue and discard inert
+/// records until a byte-producing key press (or the deadline) arrives.
+fn consoleReadable(fd: Fd, ms: i32) bool {
+    const deadline: ?u64 = if (ms < 0) null else GetTickCount64() + @as(u64, @intCast(ms));
+    while (true) {
+        const remaining: DWORD = if (deadline) |d| blk: {
+            const now = GetTickCount64();
+            if (now >= d) return false;
+            break :blk @intCast(@min(d - now, std.math.maxInt(DWORD) - 1));
+        } else INFINITE;
+        if (WaitForSingleObject(fd, remaining) != WAIT_OBJECT_0) return false;
+        // SAFETY: PeekConsoleInputW fills `got` records before any are read.
+        var recs: [16]INPUT_RECORD = undefined;
+        var got: DWORD = 0;
+        if (!PeekConsoleInputW(fd, &recs, recs.len, &got).toBool()) return true;
+        if (got == 0) return false;
+        for (recs[0..got]) |r| {
+            if (producesBytes(r)) return true;
+        }
+        // Only inert records at the head of the queue: consume exactly the
+        // ones we inspected (records are FIFO) and wait again.
+        var drained: DWORD = 0;
+        if (!ReadConsoleInputW(fd, &recs, got, &drained).toBool()) return true;
+    }
+}
+
+fn producesBytes(r: INPUT_RECORD) bool {
+    if (r.EventType != KEY_EVENT) return false;
+    const k = r.Event.KeyEvent;
+    if (!k.bKeyDown.toBool()) return false;
+    return switch (k.wVirtualKeyCode) {
+        VK_SHIFT, VK_CONTROL, VK_MENU, VK_CAPITAL, VK_LWIN, VK_RWIN, VK_NUMLOCK, VK_SCROLL => false,
+        else => true,
+    };
 }
 
 pub const isTty = isTtyFd;
