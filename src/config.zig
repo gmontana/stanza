@@ -94,6 +94,12 @@ pub const PaintFn = *const fn (ctx: ?*anyopaque, line: []const u8, out: *Painter
 /// modal normal/insert split (starting in insert).
 pub const Editing = enum { emacs, vi };
 
+/// What Tab does with several completion candidates: `.list` inserts the
+/// longest common prefix and prints the candidates (readline-style);
+/// `.cycle` replaces the word with each candidate in turn, Shift-Tab going
+/// backward (linenoise-style).
+pub const CompleteStyle = enum { list, cycle };
+
 /// Behavior of an `Editor`. All fields are optional; the zero value is a plain
 /// editor with history but no completion, hints, or highlighting.
 pub const Config = struct {
@@ -102,6 +108,7 @@ pub const Config = struct {
     /// Key-binding style; defaults to vi (starts in insert mode).
     editing: Editing = .vi,
     complete: ?CompleteFn = null,
+    complete_style: CompleteStyle = .list,
     hint: ?HintFn = null,
     paint: ?PaintFn = null,
     /// Wrap long lines across rows instead of scrolling a single row. Note:

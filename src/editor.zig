@@ -13,6 +13,7 @@ const config = @import("config.zig");
 const key = @import("key.zig");
 const sys = @import("sys.zig");
 const render = @import("render.zig");
+const vi = @import("vi.zig");
 const unicode = @import("unicode.zig");
 const Terminal = sys.Terminal;
 const Line = @import("line.zig").Line;
@@ -43,15 +44,23 @@ pub const Editor = struct {
     paste_match: usize = 0,
     paste_buf: std.ArrayList(u8) = .empty,
     search_state: ?SearchState = null,
+    cycle: ?CycleState = null,
     active: bool = false,
     hidden: bool = false,
 
-    const Action = enum { cont, submit, cancel, eof };
+    pub const Action = enum { cont, submit, cancel, eof };
     const SearchStep = enum { stay, submit, restore, leave };
     const SearchState = struct {
         saved: []u8,
         q: std.ArrayList(u8) = .empty,
         idx: ?usize = null,
+    };
+    /// Candidates live in the completion arena, which stays untouched while
+    /// a cycle is in progress.
+    const CycleState = struct {
+        items: []const []const u8,
+        shown_len: usize,
+        idx: usize,
     };
 
     pub const Step = union(enum) { line: []u8, more };
@@ -129,9 +138,10 @@ pub const Editor = struct {
         }
         self.line.clear();
         self.resetNav();
-        self.resetVi();
+        vi.reset(self);
         self.resetPaste();
         self.clearSearch();
+        self.cycle = null;
         self.ml_row = 0;
         self.active = true;
         self.hidden = false;
@@ -249,7 +259,11 @@ pub const Editor = struct {
 
     fn apply(self: *Editor, k: key.Key) !Action {
         if (try self.interceptKey(k)) return .cont;
-        if (self.cfg.editing == .vi and self.vi_normal) return self.viNormal(k);
+        switch (k) { // any key but Tab/Shift-Tab ends a completion cycle
+            .tab, .backtab => {},
+            else => self.cycle = null,
+        }
+        if (self.cfg.editing == .vi and self.vi_normal) return self.viNormalKey(k);
         switch (k) {
             .char => |cp| try self.line.insert(cp),
             .submit => return .submit,
@@ -276,8 +290,9 @@ pub const Editor = struct {
             .up => try self.histPrev(),
             .down => try self.histNext(),
             .search_back, .paste_begin, .suspend_proc => unreachable,
-            .escape => if (self.cfg.editing == .vi) self.enterNormal(),
-            .backtab, .ignore => {},
+            .escape => if (self.cfg.editing == .vi) vi.enterNormal(self),
+            .backtab => if (self.cfg.complete_style == .cycle) try self.cycleStep(.back),
+            .ignore => {},
         }
         return .cont;
     }
@@ -295,6 +310,17 @@ pub const Editor = struct {
         self.term.updateSize(); // the window may have changed while stopped
         self.ml_row = 0;
         try self.redraw();
+    }
+
+    /// vi normal mode: history navigation stays an editor concern; everything
+    /// else is the vi module's.
+    fn viNormalKey(self: *Editor, k: key.Key) !Action {
+        switch (k) {
+            .up => try self.histPrev(),
+            .down => try self.histNext(),
+            else => return vi.normal(self, k),
+        }
+        return .cont;
     }
 
     /// Keys handled before mode dispatch: they apply in every editing mode
@@ -381,17 +407,57 @@ pub const Editor = struct {
     // --- completion ---
 
     fn complete(self: *Editor) !void {
-        const cb = self.cfg.complete orelse return self.term.bell();
-        _ = self.arena.reset(.retain_capacity);
-        var comps = config.Completions{ .arena = self.arena.allocator() };
+        switch (self.cfg.complete_style) {
+            .list => try self.completeList(),
+            .cycle => try self.cycleStep(.fwd),
+        }
+    }
+
+    fn completeList(self: *Editor) !void {
+        const items = (try self.gatherComps()) orelse return;
         const word = self.currentWord();
-        try cb(self.cfg.ctx, word, &comps);
-        const items = comps.items.items;
-        if (items.len == 0) return self.term.bell();
         if (items.len == 1) return self.line.replaceBack(word.len, items[0]);
         const lcp = longestPrefix(items);
         if (lcp.len > word.len) return self.line.replaceBack(word.len, lcp);
         try self.listComps(items);
+    }
+
+    /// Run the completion callback into a freshly reset arena. Null means
+    /// "nothing to do" (no callback or no candidates; the bell already rang).
+    fn gatherComps(self: *Editor) !?[]const []const u8 {
+        const cb = self.cfg.complete orelse {
+            self.term.bell();
+            return null;
+        };
+        _ = self.arena.reset(.retain_capacity);
+        var comps = config.Completions{ .arena = self.arena.allocator() };
+        try cb(self.cfg.ctx, self.currentWord(), &comps);
+        if (comps.items.items.len == 0) {
+            self.term.bell();
+            return null;
+        }
+        return comps.items.items;
+    }
+
+    fn cycleStep(self: *Editor, dir: enum { fwd, back }) !void {
+        if (self.cycle == null) return self.cycleBegin();
+        const c = &self.cycle.?;
+        const n = c.items.len;
+        const next = switch (dir) {
+            .fwd => (c.idx + 1) % n,
+            .back => (c.idx + n - 1) % n,
+        };
+        try self.line.replaceBack(c.shown_len, c.items[next]);
+        c.idx = next;
+        c.shown_len = c.items[next].len;
+    }
+
+    fn cycleBegin(self: *Editor) !void {
+        const items = (try self.gatherComps()) orelse return;
+        const word = self.currentWord();
+        try self.line.replaceBack(word.len, items[0]);
+        if (items.len == 1) return; // nothing to cycle through
+        self.cycle = .{ .items = items, .shown_len = items[0].len, .idx = 0 };
     }
 
     fn currentWord(self: *Editor) []const u8 {
@@ -564,174 +630,6 @@ pub const Editor = struct {
         try self.term.write(self.out_buf.items);
     }
 
-    // --- vi mode ---
-
-    fn viNormal(self: *Editor, k: key.Key) !Action {
-        switch (k) {
-            .char => |cp| try self.viChar(cp),
-            .submit => return .submit,
-            .interrupt, .cancel => return .cancel,
-            // .eof is a closed input stream (Ctrl-D arrives as .ctrl_d), so it
-            // must always end the line or the editor spins on a dead fd.
-            .eof => return .eof,
-            .left, .backspace => self.line.left(),
-            .right => self.line.cursor = self.viRight(self.line.cursor),
-            .up => try self.histPrev(),
-            .down => try self.histNext(),
-            .home => self.line.home(),
-            .end => self.line.end(),
-            .escape => self.resetPending(),
-            else => {},
-        }
-        return .cont;
-    }
-
-    fn viChar(self: *Editor, cp_full: u21) !void {
-        if (self.vi_replace) return self.viReplace(cp_full);
-        // Non-ASCII can't be a vi command; 0 falls through every arm to a bell.
-        const cp: u8 = if (cp_full < 128) @intCast(cp_full) else 0;
-        if ((cp >= '1' and cp <= '9') or (cp == '0' and self.vi_count > 0)) {
-            self.vi_count = self.vi_count *| 10 +| (cp - '0'); // saturate, never trap
-            return;
-        }
-        // No count exceeds the line length in effect; clamping keeps absurd
-        // counts from spinning through billions of no-op motion steps.
-        const raw = if (self.vi_count == 0) 1 else self.vi_count;
-        const count = @min(raw, self.line.text().len + 1);
-        self.vi_count = 0;
-        if (self.vi_op) |op| {
-            self.vi_op = null;
-            return self.viOperate(op, cp, count);
-        }
-        return self.viCommand(cp, count);
-    }
-
-    fn viCommand(self: *Editor, cp: u8, count: usize) !void {
-        switch (cp) {
-            'i' => self.enterInsert(),
-            'a' => self.appendInsert(),
-            'I' => {
-                self.line.home();
-                self.enterInsert();
-            },
-            'A' => {
-                self.line.end();
-                self.enterInsert();
-            },
-            's' => {
-                self.line.deleteFwd();
-                self.enterInsert();
-            },
-            'x' => try self.viDelChars(count),
-            'D' => try self.line.killToEnd(),
-            'C' => {
-                try self.line.killToEnd();
-                self.enterInsert();
-            },
-            'p' => try self.line.yank(), // pastes at the cursor (vi puts it after)
-            '~' => self.line.swapCase(),
-            'r' => self.vi_replace = true, // replaces one char; a count is ignored
-            'd', 'c' => self.vi_op = cp,
-            else => self.viMove(cp, count),
-        }
-    }
-
-    fn appendInsert(self: *Editor) void {
-        self.line.right();
-        self.enterInsert();
-    }
-
-    fn viMove(self: *Editor, cp: u8, count: usize) void {
-        if (self.viMotion(cp, count)) |idx| self.line.cursor = idx else self.term.bell();
-    }
-
-    fn viMotion(self: *Editor, cp: u8, count: usize) ?usize {
-        var idx = self.line.cursor;
-        var i: usize = 0;
-        while (i < count) : (i += 1) {
-            idx = switch (cp) {
-                'h' => self.line.idxLeft(idx),
-                'l', ' ' => self.viRight(idx),
-                'w' => self.line.idxWordFwd(idx),
-                'e' => self.line.idxWordR(idx),
-                'b' => self.line.idxWordL(idx),
-                '0', '^' => 0,
-                '$' => self.viLineEnd(),
-                else => return null,
-            };
-        }
-        return idx;
-    }
-
-    fn viRight(self: *Editor, idx: usize) usize {
-        const len = self.line.text().len;
-        const next = self.line.idxRight(idx);
-        return if (len > 0 and next >= len) self.line.idxLeft(len) else next;
-    }
-
-    fn viLineEnd(self: *Editor) usize {
-        const len = self.line.text().len;
-        return if (len == 0) 0 else self.line.idxLeft(len);
-    }
-
-    fn viOperate(self: *Editor, op: u8, cp: u8, count: usize) !void {
-        if (cp == op) { // dd / cc
-            try self.line.deleteSpan(0, self.line.text().len);
-            if (op == 'c') self.enterInsert();
-            return;
-        }
-        // `cw` deliberately acts like `dw` (the gap goes too), unlike vi's `ce`.
-        const target = if (cp == '$')
-            self.line.text().len
-        else
-            self.viMotion(cp, count) orelse return self.term.bell();
-        const lo = @min(self.line.cursor, target);
-        const hi = @max(self.line.cursor, target);
-        try self.line.deleteSpan(lo, hi);
-        if (op == 'c') self.enterInsert();
-    }
-
-    fn viDelChars(self: *Editor, count: usize) !void {
-        const start = self.line.cursor;
-        var stop = start;
-        var i: usize = 0;
-        while (i < count and stop < self.line.text().len) : (i += 1) {
-            stop = self.line.idxRight(stop);
-        }
-        if (stop > start) try self.line.deleteSpan(start, stop);
-    }
-
-    fn viReplace(self: *Editor, cp: u21) !void {
-        self.vi_replace = false;
-        if (self.line.cursor >= self.line.text().len) return self.term.bell();
-        self.line.deleteFwd();
-        try self.line.insert(cp);
-        self.line.left();
-    }
-
-    fn enterInsert(self: *Editor) void {
-        self.vi_normal = false;
-        self.term.cursorShape(false);
-    }
-
-    fn enterNormal(self: *Editor) void {
-        self.vi_normal = true;
-        if (self.line.cursor > 0) self.line.left();
-        self.resetPending();
-        self.term.cursorShape(true);
-    }
-
-    fn resetPending(self: *Editor) void {
-        self.vi_count = 0;
-        self.vi_op = null;
-        self.vi_replace = false;
-    }
-
-    fn resetVi(self: *Editor) void {
-        self.vi_normal = false;
-        self.resetPending();
-    }
-
     // --- non-tty fallback ---
 
     fn plainRead(self: *Editor, text: []const u8) ![]u8 {
@@ -825,75 +723,6 @@ fn testEditor(editing: config.Editing, fd_out: sys.Fd) Editor {
 
 fn typeText(ed: *Editor, s: []const u8) !void {
     for (s) |c| _ = try ed.apply(.{ .char = c });
-}
-
-fn sendCmd(ed: *Editor, c: u8) !void {
-    _ = try ed.apply(.{ .char = c });
-}
-
-test "vi: x deletes, 0/D kill to end" {
-    const dn = try sys.devNull();
-    defer sys.close(dn);
-    var ed = testEditor(.vi, dn);
-    defer ed.deinit();
-    try typeText(&ed, "hello");
-    _ = try ed.apply(.escape); // normal mode, cursor on 'o'
-    try sendCmd(&ed, 'x'); // delete 'o'
-    try std.testing.expectEqualStrings("hell", ed.line.text());
-    try sendCmd(&ed, '0');
-    try sendCmd(&ed, 'D');
-    try std.testing.expectEqualStrings("", ed.line.text());
-}
-
-test "vi: dd clears, dw deletes a word" {
-    const dn = try sys.devNull();
-    defer sys.close(dn);
-    var ed = testEditor(.vi, dn);
-    defer ed.deinit();
-    try typeText(&ed, "foo bar");
-    _ = try ed.apply(.escape);
-    try sendCmd(&ed, '0');
-    try sendCmd(&ed, 'd');
-    try sendCmd(&ed, 'w');
-    try std.testing.expectEqualStrings("bar", ed.line.text());
-    try sendCmd(&ed, 'd');
-    try sendCmd(&ed, 'd');
-    try std.testing.expectEqualStrings("", ed.line.text());
-}
-
-test "vi: I/A inserts, count repeats delete" {
-    const dn = try sys.devNull();
-    defer sys.close(dn);
-    var ed = testEditor(.vi, dn);
-    defer ed.deinit();
-    try typeText(&ed, "bcd");
-    _ = try ed.apply(.escape);
-    try sendCmd(&ed, 'I'); // insert at home
-    try typeText(&ed, "a"); // -> abcd
-    _ = try ed.apply(.escape);
-    try sendCmd(&ed, 'A'); // append at end
-    try typeText(&ed, "e"); // -> abcde
-    try std.testing.expectEqualStrings("abcde", ed.line.text());
-    _ = try ed.apply(.escape);
-    try sendCmd(&ed, '0');
-    try sendCmd(&ed, '2');
-    try sendCmd(&ed, 'x'); // delete two from start
-    try std.testing.expectEqualStrings("cde", ed.line.text());
-}
-
-test "vi: r replaces and ~ toggles case" {
-    const dn = try sys.devNull();
-    defer sys.close(dn);
-    var ed = testEditor(.vi, dn);
-    defer ed.deinit();
-    try typeText(&ed, "cat");
-    _ = try ed.apply(.escape);
-    try sendCmd(&ed, '0');
-    try sendCmd(&ed, 'r');
-    try sendCmd(&ed, 'b'); // c -> b
-    try std.testing.expectEqualStrings("bat", ed.line.text());
-    try sendCmd(&ed, '~'); // b -> B
-    try std.testing.expectEqualStrings("Bat", ed.line.text());
 }
 
 test "emacs: kill/yank/word/transpose wiring" {
@@ -1033,87 +862,42 @@ test "non-tty input falls back to a plain line read" {
     try std.testing.expectError(error.Eof, ed.prompt("> "));
 }
 
-test "vi: h/l/w/b/$/0 motions move the cursor" {
-    const dn = try sys.devNull();
-    defer sys.close(dn);
-    var ed = testEditor(.vi, dn);
-    defer ed.deinit();
-    try typeText(&ed, "ab cd");
-    _ = try ed.apply(.escape);
-    try sendCmd(&ed, '0');
-    try std.testing.expectEqual(@as(usize, 0), ed.line.cursor);
-    try sendCmd(&ed, 'l');
-    try std.testing.expectEqual(@as(usize, 1), ed.line.cursor);
-    try sendCmd(&ed, 'w'); // start of next word
-    try std.testing.expectEqual(@as(usize, 3), ed.line.cursor);
-    try sendCmd(&ed, 'b'); // back a word
-    try std.testing.expectEqual(@as(usize, 0), ed.line.cursor);
-    try sendCmd(&ed, '$'); // end
-    try std.testing.expectEqual(@as(usize, 4), ed.line.cursor);
-}
-
-test "vi: dollar lands on last char while d$ deletes through end" {
-    const dn = try sys.devNull();
-    defer sys.close(dn);
-    var ed = testEditor(.vi, dn);
-    defer ed.deinit();
-    try typeText(&ed, "abcd");
-    _ = try ed.apply(.escape);
-    try sendCmd(&ed, '$');
-    try std.testing.expectEqual(@as(usize, 3), ed.line.cursor);
-    try sendCmd(&ed, 'x');
-    try std.testing.expectEqualStrings("abc", ed.line.text());
-
-    try ed.line.setText("abcd");
-    try sendCmd(&ed, '0');
-    try sendCmd(&ed, 'd');
-    try sendCmd(&ed, '$');
-    try std.testing.expectEqualStrings("", ed.line.text());
-}
-
-test "vi: a appends, p pastes the last kill" {
-    const dn = try sys.devNull();
-    defer sys.close(dn);
-    var ed = testEditor(.vi, dn);
-    defer ed.deinit();
-    try typeText(&ed, "ac");
-    _ = try ed.apply(.escape);
-    try sendCmd(&ed, '0'); // on 'a'
-    try sendCmd(&ed, 'a'); // append after 'a'
-    try typeText(&ed, "b");
-    _ = try ed.apply(.escape);
-    try std.testing.expectEqualStrings("abc", ed.line.text());
-    try sendCmd(&ed, '0');
-    try sendCmd(&ed, 'D'); // kill "abc"
-    try std.testing.expectEqualStrings("", ed.line.text());
-    try sendCmd(&ed, 'p'); // paste it back
-    try std.testing.expectEqualStrings("abc", ed.line.text());
-}
-
-test "vi: dd and x update the paste register" {
-    const dn = try sys.devNull();
-    defer sys.close(dn);
-    var ed = testEditor(.vi, dn);
-    defer ed.deinit();
-    try typeText(&ed, "abc");
-    _ = try ed.apply(.escape);
-    try sendCmd(&ed, 'd');
-    try sendCmd(&ed, 'd');
-    try std.testing.expectEqualStrings("", ed.line.text());
-    try sendCmd(&ed, 'p');
-    try std.testing.expectEqualStrings("abc", ed.line.text());
-
-    try sendCmd(&ed, '0');
-    try sendCmd(&ed, 'x');
-    try std.testing.expectEqualStrings("bc", ed.line.text());
-    try sendCmd(&ed, 'p');
-    try std.testing.expectEqualStrings("abc", ed.line.text());
-}
-
 fn twoCompletions(_: ?*anyopaque, word: []const u8, out: *config.Completions) anyerror!void {
     _ = word;
     try out.add("commit");
     try out.add("commute");
+}
+
+test "cycle completion walks candidates both ways and wraps" {
+    const dn = try sys.devNull();
+    defer sys.close(dn);
+    const cfg = config.Config{ .complete = twoCompletions, .complete_style = .cycle };
+    var ed = Editor.initFd(std.testing.allocator, cfg, dn, dn);
+    defer ed.deinit();
+    try typeText(&ed, "com");
+    _ = try ed.apply(.tab);
+    try std.testing.expectEqualStrings("commit", ed.line.text());
+    _ = try ed.apply(.tab);
+    try std.testing.expectEqualStrings("commute", ed.line.text());
+    _ = try ed.apply(.tab); // wraps forward
+    try std.testing.expectEqualStrings("commit", ed.line.text());
+    _ = try ed.apply(.backtab); // and backward
+    try std.testing.expectEqualStrings("commute", ed.line.text());
+}
+
+test "any other key ends a completion cycle" {
+    const dn = try sys.devNull();
+    defer sys.close(dn);
+    const cfg = config.Config{ .complete = twoCompletions, .complete_style = .cycle };
+    var ed = Editor.initFd(std.testing.allocator, cfg, dn, dn);
+    defer ed.deinit();
+    try typeText(&ed, "com");
+    _ = try ed.apply(.tab);
+    try std.testing.expectEqualStrings("commit", ed.line.text());
+    try typeText(&ed, "x"); // ends the cycle
+    try std.testing.expect(ed.cycle == null);
+    _ = try ed.apply(.tab); // a fresh cycle completes the new word "commitx"
+    try std.testing.expectEqualStrings("commit", ed.line.text());
 }
 
 test "completion inserts the longest common prefix" {
@@ -1126,61 +910,10 @@ test "completion inserts the longest common prefix" {
     try std.testing.expectEqualStrings("comm", ed.line.text()); // common prefix of commit/commute
 }
 
-test "vi: cw changes a word, cc changes the whole line" {
-    const dn = try sys.devNull();
-    defer sys.close(dn);
-    var ed = testEditor(.vi, dn);
-    defer ed.deinit();
-    try typeText(&ed, "foo bar");
-    _ = try ed.apply(.escape);
-    try sendCmd(&ed, '0');
-    try sendCmd(&ed, 'c'); // operator
-    try sendCmd(&ed, 'w'); // ...over a word: deletes "foo " and enters insert
-    try typeText(&ed, "baz");
-    _ = try ed.apply(.escape);
-    try std.testing.expectEqualStrings("bazbar", ed.line.text());
-    try sendCmd(&ed, 'c');
-    try sendCmd(&ed, 'c'); // change the whole line
-    try typeText(&ed, "new");
-    _ = try ed.apply(.escape);
-    try std.testing.expectEqualStrings("new", ed.line.text());
-}
-
-test "vi: s substitutes a char, C changes to end of line" {
-    const dn = try sys.devNull();
-    defer sys.close(dn);
-    var ed = testEditor(.vi, dn);
-    defer ed.deinit();
-    try typeText(&ed, "cat");
-    _ = try ed.apply(.escape);
-    try sendCmd(&ed, '0');
-    try sendCmd(&ed, 's'); // delete char, enter insert
-    try typeText(&ed, "b"); // -> "bat"
-    _ = try ed.apply(.escape);
-    try std.testing.expectEqualStrings("bat", ed.line.text());
-    try sendCmd(&ed, '0');
-    try sendCmd(&ed, 'l'); // on 'a'
-    try sendCmd(&ed, 'C'); // change to end: kills "at"
-    try typeText(&ed, "ig"); // -> "big"
-    _ = try ed.apply(.escape);
-    try std.testing.expectEqualStrings("big", ed.line.text());
-}
-
 fn forkCompletions(_: ?*anyopaque, word: []const u8, out: *config.Completions) anyerror!void {
     _ = word;
     try out.add("commit");
     try out.add("config"); // share only "co" with the word -> no prefix to add -> list
-}
-
-test "vi: closed input reports EOF even with text on the line" {
-    const dn = try sys.devNull();
-    defer sys.close(dn);
-    var ed = testEditor(.vi, dn);
-    defer ed.deinit();
-    try typeText(&ed, "abc");
-    _ = try ed.apply(.escape);
-    // .eof is a closed stream, not Ctrl-D; swallowing it would busy-spin.
-    try std.testing.expect((try ed.apply(.eof)) == .eof);
 }
 
 test "search leaves on EOF instead of spinning" {
@@ -1221,19 +954,6 @@ test "editFeed returns during reverse search" {
         .more => return error.TestUnexpectedResult,
     }
     try std.testing.expect(ed.search_state == null);
-}
-
-test "vi: absurd counts neither overflow nor hang" {
-    const dn = try sys.devNull();
-    defer sys.close(dn);
-    var ed = testEditor(.vi, dn);
-    defer ed.deinit();
-    try typeText(&ed, "ab");
-    _ = try ed.apply(.escape);
-    // Way past usize overflow if accumulated unchecked; must stay safe...
-    for (0..25) |_| try sendCmd(&ed, '9');
-    try sendCmd(&ed, 'l'); // ...and the motion must return promptly, clamped
-    try std.testing.expectEqual(@as(usize, 1), ed.line.cursor);
 }
 
 test "plain read strips only the line-ending CR" {

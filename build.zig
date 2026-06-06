@@ -19,6 +19,7 @@ const posix_sources = [_][]const u8{
     "src/sys.zig",
     "src/key.zig",
     "src/history.zig",
+    "src/vi.zig",
     "src/editor.zig",
     "src/root.zig",
 };
@@ -29,6 +30,7 @@ const windows_sources = [_][]const u8{
     "src/sys.zig",
     "src/key.zig",
     "src/history.zig",
+    "src/vi.zig",
     "src/editor.zig",
     "src/root.zig",
 };
