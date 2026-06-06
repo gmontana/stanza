@@ -10,11 +10,10 @@
 const std = @import("std");
 const config = @import("config.zig");
 const key = @import("key.zig");
-const term = @import("term.zig");
 const sys = @import("sys.zig");
 const render = @import("render.zig");
 const unicode = @import("unicode.zig");
-const Terminal = term.Terminal;
+const Terminal = sys.Terminal;
 const Line = @import("line.zig").Line;
 const History = @import("history.zig").History;
 
@@ -38,7 +37,7 @@ pub const Editor = struct {
     vi_replace: bool = false,
     sized: bool = false,
     ml_row: usize = 0,
-    resize_requested: bool = false,
+    resize_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     pasting: bool = false,
     paste_match: usize = 0,
     paste_buf: std.ArrayList(u8) = .empty,
@@ -113,7 +112,7 @@ pub const Editor = struct {
     /// `waitInput` before `editFeed`, and `editStop` when done.
     /// Requires a terminal (use `prompt` for the pipe-friendly path).
     pub fn editStart(self: *Editor, text: []const u8) !void {
-        if (self.cfg.install_resize_handler) term.installResize();
+        if (self.cfg.install_resize_handler) sys.installResize();
         try self.term.enableRaw();
         errdefer self.editStop(); // never leave the tty raw on a failed start
         self.term.pasteOn();
@@ -139,8 +138,7 @@ pub const Editor = struct {
     /// (owned, free it) on Enter, `.more` while the line is unfinished, or
     /// `error.Eof` / `error.Interrupted`.
     pub fn editFeed(self: *Editor) !Step {
-        if (self.resize_requested or term.resized()) {
-            self.resize_requested = false;
+        if (self.resize_requested.swap(false, .seq_cst) or sys.resized()) {
             self.term.updateSize();
         }
         var redraw_prompt = true;
@@ -159,11 +157,7 @@ pub const Editor = struct {
                 continue;
             }
             const decoded = (try key.decodeAvailable(&self.src)) orelse break;
-            switch (decoded) {
-                .paste_begin => self.startPaste(),
-                .search_back => try self.startSearch(),
-                else => if (try self.stepFromAction(try self.apply(decoded))) |step| return step,
-            }
+            if (try self.stepFromAction(try self.apply(decoded))) |step| return step;
         }
         if (redraw_prompt) try self.redraw();
         return .more;
@@ -196,7 +190,7 @@ pub const Editor = struct {
     /// Tell the editor that the terminal size changed. This is for hosts that
     /// observe resize events themselves and leave `install_resize_handler` false.
     pub fn notifyResize(self: *Editor) void {
-        self.resize_requested = true;
+        self.resize_requested.store(true, .seq_cst);
     }
 
     /// Wait for input on the editor's descriptor. This is the portable helper
@@ -211,6 +205,7 @@ pub const Editor = struct {
     }
 
     fn apply(self: *Editor, k: key.Key) !Action {
+        if (try self.startInputMode(k)) return .cont;
         if (self.cfg.editing == .vi and self.vi_normal) return self.viNormal(k);
         switch (k) {
             .char => |cp| try self.line.insert(cp),
@@ -240,12 +235,25 @@ pub const Editor = struct {
             },
             .up => try self.histPrev(),
             .down => try self.histNext(),
-            .search_back => return self.search(),
-            .paste_begin => try self.readPaste(),
+            .search_back, .paste_begin => unreachable,
             .escape => if (self.cfg.editing == .vi) self.enterNormal(),
             .backtab, .ignore => {},
         }
         return .cont;
+    }
+
+    fn startInputMode(self: *Editor, k: key.Key) !bool {
+        switch (k) {
+            .search_back => {
+                try self.startSearch();
+                return true;
+            },
+            .paste_begin => {
+                self.startPaste();
+                return true;
+            },
+            else => return false,
+        }
     }
 
     fn redraw(self: *Editor) !void {
@@ -405,38 +413,6 @@ pub const Editor = struct {
         self.resetPaste();
     }
 
-    fn readPaste(self: *Editor) !void {
-        var buf: std.ArrayList(u8) = .empty;
-        defer buf.deinit(self.alloc);
-        try self.collectPaste(&buf);
-        try self.line.insertText(buf.items);
-    }
-
-    fn collectPaste(self: *Editor, out: *std.ArrayList(u8)) !void {
-        const tail = "\x1b[201~";
-        var m: usize = 0;
-        while (try self.src.next()) |b| {
-            if (b == tail[m]) {
-                m += 1;
-                if (m == tail.len) return;
-                continue;
-            }
-            // Mismatch: the held-back prefix was content after all. Sanitize
-            // it like any other pasted byte (never raw — it starts with ESC),
-            // then retry `b` as a fresh match start, since an ESC in the
-            // content can immediately precede the real end marker.
-            for (tail[0..m]) |p| try appendPaste(out, self.alloc, p);
-            m = 0;
-            if (b == tail[0]) {
-                m = 1;
-                continue;
-            }
-            try appendPaste(out, self.alloc, b);
-        }
-        // Unterminated paste: whatever prefix we were holding was content.
-        for (tail[0..m]) |p| try appendPaste(out, self.alloc, p);
-    }
-
     // --- reverse incremental search ---
 
     fn startSearch(self: *Editor) !void {
@@ -454,10 +430,8 @@ pub const Editor = struct {
     fn feedSearch(self: *Editor) !?Action {
         while (true) {
             const k = (try key.decodeAvailable(&self.src)) orelse return null;
-            const step = blk: {
-                var state = &self.search_state.?;
-                break :blk try self.searchKey(k, &state.q, &state.idx);
-            };
+            const state = if (self.search_state) |*state| state else return .cont;
+            const step = try self.searchKey(k, &state.q, &state.idx);
             switch (step) {
                 .stay => {},
                 .submit => {
@@ -476,7 +450,6 @@ pub const Editor = struct {
                     return .cont;
                 },
             }
-            const state = &self.search_state.?;
             if (state.idx) |i| try self.line.setText(self.history.at(i));
             try self.drawSearch(state.q.items, state.idx == null and state.q.items.len > 0);
         }
@@ -488,40 +461,6 @@ pub const Editor = struct {
             state.q.deinit(self.alloc);
         }
         self.search_state = null;
-    }
-
-    fn search(self: *Editor) !Action {
-        const saved = try self.alloc.dupe(u8, self.line.text());
-        defer self.alloc.free(saved);
-        var q: std.ArrayList(u8) = .empty;
-        defer q.deinit(self.alloc);
-        var idx: ?usize = null;
-        // The search display is a single row; collapse a multi-row block to
-        // its top row first so the post-search redraw starts from row 0.
-        if (self.ml_row > 0) {
-            self.out_buf.clearRetainingCapacity();
-            try render.appendNum(&self.out_buf, self.alloc, "\x1b[", self.ml_row, "A");
-            try self.term.write(self.out_buf.items);
-            self.ml_row = 0;
-        }
-        try self.drawSearch(q.items, false);
-        while (true) {
-            const k = try key.decode(&self.src);
-            switch (try self.searchKey(k, &q, &idx)) {
-                .stay => {},
-                .submit => {
-                    try self.redraw();
-                    return .submit;
-                },
-                .restore => {
-                    try self.line.setText(saved);
-                    return .cont;
-                },
-                .leave => return .cont,
-            }
-            if (idx) |i| try self.line.setText(self.history.at(i));
-            try self.drawSearch(q.items, idx == null and q.items.len > 0);
-        }
     }
 
     fn searchKey(self: *Editor, k: key.Key, q: *std.ArrayList(u8), idx: *?usize) !SearchStep {
@@ -806,10 +745,6 @@ test "longest common prefix" {
     try std.testing.expectEqualStrings("", longestPrefix(&split_codepoint));
 }
 
-fn devNull() !sys.Fd {
-    return sys.devNull();
-}
-
 fn openWrite(path: []const u8) !sys.Fd {
     return sys.openWriteTrunc(path, 0o600);
 }
@@ -835,7 +770,7 @@ fn sendCmd(ed: *Editor, c: u8) !void {
 }
 
 test "vi: x deletes, 0/D kill to end" {
-    const dn = try devNull();
+    const dn = try sys.devNull();
     defer sys.close(dn);
     var ed = testEditor(.vi, dn);
     defer ed.deinit();
@@ -849,7 +784,7 @@ test "vi: x deletes, 0/D kill to end" {
 }
 
 test "vi: dd clears, dw deletes a word" {
-    const dn = try devNull();
+    const dn = try sys.devNull();
     defer sys.close(dn);
     var ed = testEditor(.vi, dn);
     defer ed.deinit();
@@ -865,7 +800,7 @@ test "vi: dd clears, dw deletes a word" {
 }
 
 test "vi: I/A inserts, count repeats delete" {
-    const dn = try devNull();
+    const dn = try sys.devNull();
     defer sys.close(dn);
     var ed = testEditor(.vi, dn);
     defer ed.deinit();
@@ -885,7 +820,7 @@ test "vi: I/A inserts, count repeats delete" {
 }
 
 test "vi: r replaces and ~ toggles case" {
-    const dn = try devNull();
+    const dn = try sys.devNull();
     defer sys.close(dn);
     var ed = testEditor(.vi, dn);
     defer ed.deinit();
@@ -900,7 +835,7 @@ test "vi: r replaces and ~ toggles case" {
 }
 
 test "emacs: kill/yank/word/transpose wiring" {
-    const dn = try devNull();
+    const dn = try sys.devNull();
     defer sys.close(dn);
     var ed = testEditor(.emacs, dn);
     defer ed.deinit();
@@ -920,7 +855,7 @@ test "emacs: kill/yank/word/transpose wiring" {
 }
 
 test "bracketed paste inserts sanitized text" {
-    const dn = try devNull();
+    const dn = try sys.devNull();
     defer sys.close(dn);
     var ed = testEditor(.emacs, dn);
     defer ed.deinit();
@@ -929,12 +864,13 @@ test "bracketed paste inserts sanitized text" {
     const body = "a\nb\tc\x1b[201~";
     @memcpy(ed.src.buf[0..body.len], body);
     ed.src.len = body.len;
-    _ = try ed.apply(.paste_begin);
+    ed.startPaste();
+    try std.testing.expect(try ed.feedPaste());
     try std.testing.expectEqualStrings("a b\tc", ed.line.text());
 }
 
 test "paste strips ESC bytes and still finds an end marker right after one" {
-    const dn = try devNull();
+    const dn = try sys.devNull();
     defer sys.close(dn);
     var ed = testEditor(.emacs, dn);
     defer ed.deinit();
@@ -943,12 +879,13 @@ test "paste strips ESC bytes and still finds an end marker right after one" {
     const body = "x\x1by\x1b\x1b[201~";
     @memcpy(ed.src.buf[0..body.len], body);
     ed.src.len = body.len;
-    _ = try ed.apply(.paste_begin);
+    ed.startPaste();
+    try std.testing.expect(try ed.feedPaste());
     try std.testing.expectEqualStrings("xy", ed.line.text());
 }
 
 test "unterminated paste keeps the held-back marker prefix as sanitized text" {
-    const dn = try devNull();
+    const dn = try sys.devNull();
     defer sys.close(dn);
     var ed = testEditor(.emacs, dn);
     defer ed.deinit();
@@ -957,12 +894,14 @@ test "unterminated paste keeps the held-back marker prefix as sanitized text" {
     const body = "ab\x1b[20";
     @memcpy(ed.src.buf[0..body.len], body);
     ed.src.len = body.len;
-    _ = try ed.apply(.paste_begin);
+    ed.src.eof = true;
+    ed.startPaste();
+    try std.testing.expect(try ed.feedPaste());
     try std.testing.expectEqualStrings("ab[20", ed.line.text());
 }
 
 test "editFeed returns during an incomplete paste" {
-    const out = try devNull();
+    const out = try sys.devNull();
     defer sys.close(out);
     var ed = Editor.initFd(std.testing.allocator, .{ .editing = .emacs }, sys.invalid, out);
     defer ed.deinit();
@@ -990,7 +929,7 @@ test "editFeed returns during an incomplete paste" {
 }
 
 test "history up/down navigates and restores the draft" {
-    const dn = try devNull();
+    const dn = try sys.devNull();
     defer sys.close(dn);
     var ed = testEditor(.emacs, dn);
     defer ed.deinit();
@@ -1019,7 +958,7 @@ test "non-tty input falls back to a plain line read" {
     }
     const in = try openRead(path);
     defer sys.close(in);
-    const out = try devNull();
+    const out = try sys.devNull();
     defer sys.close(out);
     var ed = Editor.initFd(std.testing.allocator, .{}, in, out);
     defer ed.deinit();
@@ -1033,7 +972,7 @@ test "non-tty input falls back to a plain line read" {
 }
 
 test "vi: h/l/w/b/$/0 motions move the cursor" {
-    const dn = try devNull();
+    const dn = try sys.devNull();
     defer sys.close(dn);
     var ed = testEditor(.vi, dn);
     defer ed.deinit();
@@ -1052,7 +991,7 @@ test "vi: h/l/w/b/$/0 motions move the cursor" {
 }
 
 test "vi: dollar lands on last char while d$ deletes through end" {
-    const dn = try devNull();
+    const dn = try sys.devNull();
     defer sys.close(dn);
     var ed = testEditor(.vi, dn);
     defer ed.deinit();
@@ -1071,7 +1010,7 @@ test "vi: dollar lands on last char while d$ deletes through end" {
 }
 
 test "vi: a appends, p pastes the last kill" {
-    const dn = try devNull();
+    const dn = try sys.devNull();
     defer sys.close(dn);
     var ed = testEditor(.vi, dn);
     defer ed.deinit();
@@ -1090,7 +1029,7 @@ test "vi: a appends, p pastes the last kill" {
 }
 
 test "vi: dd and x update the paste register" {
-    const dn = try devNull();
+    const dn = try sys.devNull();
     defer sys.close(dn);
     var ed = testEditor(.vi, dn);
     defer ed.deinit();
@@ -1116,7 +1055,7 @@ fn twoCompletions(_: ?*anyopaque, word: []const u8, out: *config.Completions) an
 }
 
 test "completion inserts the longest common prefix" {
-    const dn = try devNull();
+    const dn = try sys.devNull();
     defer sys.close(dn);
     var ed = Editor.initFd(std.testing.allocator, .{ .complete = twoCompletions }, dn, dn);
     defer ed.deinit();
@@ -1126,7 +1065,7 @@ test "completion inserts the longest common prefix" {
 }
 
 test "vi: cw changes a word, cc changes the whole line" {
-    const dn = try devNull();
+    const dn = try sys.devNull();
     defer sys.close(dn);
     var ed = testEditor(.vi, dn);
     defer ed.deinit();
@@ -1146,7 +1085,7 @@ test "vi: cw changes a word, cc changes the whole line" {
 }
 
 test "vi: s substitutes a char, C changes to end of line" {
-    const dn = try devNull();
+    const dn = try sys.devNull();
     defer sys.close(dn);
     var ed = testEditor(.vi, dn);
     defer ed.deinit();
@@ -1172,7 +1111,7 @@ fn forkCompletions(_: ?*anyopaque, word: []const u8, out: *config.Completions) a
 }
 
 test "vi: closed input reports EOF even with text on the line" {
-    const dn = try devNull();
+    const dn = try sys.devNull();
     defer sys.close(dn);
     var ed = testEditor(.vi, dn);
     defer ed.deinit();
@@ -1183,7 +1122,7 @@ test "vi: closed input reports EOF even with text on the line" {
 }
 
 test "search leaves on EOF instead of spinning" {
-    const dn = try devNull();
+    const dn = try sys.devNull();
     defer sys.close(dn);
     var ed = testEditor(.emacs, dn);
     defer ed.deinit();
@@ -1194,7 +1133,7 @@ test "search leaves on EOF instead of spinning" {
 }
 
 test "editFeed returns during reverse search" {
-    const out = try devNull();
+    const out = try sys.devNull();
     defer sys.close(out);
     var ed = Editor.initFd(std.testing.allocator, .{ .editing = .emacs }, sys.invalid, out);
     defer ed.deinit();
@@ -1223,7 +1162,7 @@ test "editFeed returns during reverse search" {
 }
 
 test "vi: absurd counts neither overflow nor hang" {
-    const dn = try devNull();
+    const dn = try sys.devNull();
     defer sys.close(dn);
     var ed = testEditor(.vi, dn);
     defer ed.deinit();
@@ -1247,7 +1186,7 @@ test "plain read strips only the line-ending CR" {
     }
     const in = try openRead(path);
     defer sys.close(in);
-    const out = try devNull();
+    const out = try sys.devNull();
     defer sys.close(out);
     var ed = Editor.initFd(std.testing.allocator, .{}, in, out);
     defer ed.deinit();
@@ -1260,7 +1199,7 @@ test "plain read strips only the line-ending CR" {
 }
 
 test "multiline: listing completions and Ctrl-L reset the block row" {
-    const dn = try devNull();
+    const dn = try sys.devNull();
     defer sys.close(dn);
     const cfg = config.Config{ .complete = forkCompletions, .multiline = true };
     var ed = Editor.initFd(std.testing.allocator, cfg, dn, dn);
@@ -1280,7 +1219,7 @@ test "search display truncates the match to the terminal width" {
     var path_buf: [128]u8 = undefined;
     const path = try tmpPath(&path_buf, &tmp, "search");
     const out = try openWrite(path);
-    const dn = try devNull();
+    const dn = try sys.devNull();
     defer sys.close(dn);
     var ed = Editor.initFd(std.testing.allocator, .{}, dn, out);
     defer ed.deinit();
@@ -1303,7 +1242,7 @@ test "completion lists candidates when there is nothing more to insert" {
     var path_buf: [128]u8 = undefined;
     const path = try tmpPath(&path_buf, &tmp, "comp");
     const out = try openWrite(path);
-    const dn = try devNull();
+    const dn = try sys.devNull();
     defer sys.close(dn);
     var ed = Editor.initFd(std.testing.allocator, .{ .complete = forkCompletions }, dn, out);
     defer ed.deinit();

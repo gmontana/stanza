@@ -152,8 +152,9 @@ only zero-width SGR escapes; it applies when the whole line fits on screen.
 `editStart` / `editFeed` / `editStop`: start editing, wait until input is ready,
 call `editFeed`, and it returns `.more` until Enter yields a `.line`.
 `editFeed` processes bytes already available on the descriptor and returns
-without waiting for the rest of a partial UTF-8 sequence, escape sequence,
-bracketed paste, or reverse-search query.
+without waiting for the rest of a partial UTF-8 sequence, bracketed paste, or
+reverse-search query. A lone `Esc` waits up to 30 ms before it is treated as an
+Escape key so split terminal escape sequences are not misread.
 
 ```zig
 var ed = stanza.Editor.init(alloc, .{});

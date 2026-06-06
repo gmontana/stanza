@@ -105,8 +105,7 @@ pub fn stdout() Fd {
 }
 
 fn stdHandle(which: DWORD) Fd {
-    const h = GetStdHandle(which) orelse return invalid;
-    return if (h == invalid) invalid else h;
+    return GetStdHandle(which) orelse invalid;
 }
 
 pub const Terminal = struct {
@@ -301,9 +300,7 @@ pub fn readable(fd: Fd, ms: i32) bool {
     return WaitForSingleObject(fd, timeout) == WAIT_OBJECT_0;
 }
 
-pub fn isTty(fd: Fd) bool {
-    return isTtyFd(fd);
-}
+pub const isTty = isTtyFd;
 
 fn isTtyFd(fd: Fd) bool {
     if (fd == invalid) return false;
@@ -329,14 +326,7 @@ pub fn openWriteTrunc(path: []const u8, mode: u32) !Fd {
 }
 
 pub fn devNull() !Fd {
-    const h = openDevice("NUL");
-    if (h != invalid) return h;
-
-    return switch (windows.GetLastError()) {
-        .FILE_NOT_FOUND, .PATH_NOT_FOUND => error.FileNotFound,
-        .ACCESS_DENIED => error.AccessDenied,
-        else => error.InputOutput,
-    };
+    return openConsole("NUL");
 }
 
 fn openConsole(comptime name: []const u8) !Fd {

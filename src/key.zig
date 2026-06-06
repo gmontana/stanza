@@ -3,8 +3,9 @@
 //! markers) into the semantic `Key` events the editor acts on.
 //!
 //! The mapping here is Stanza's default keymap; it follows the familiar
-//! readline/Emacs bindings. The blocking decoder gives a lone Escape a short
-//! timeout; the event-loop decoder only consumes bytes already available.
+//! readline/Emacs bindings. The decoder consumes buffered/ready bytes, with a
+//! short grace period for a lone Escape so split escape sequences survive SSH
+//! or ConPTY packet boundaries.
 
 const std = @import("std");
 const unicode = @import("unicode.zig");
@@ -13,6 +14,7 @@ const sys = @import("sys.zig");
 /// How long to wait for the rest of an escape sequence before treating a lone
 /// Escape as the Escape key (matters for vi normal mode).
 const esc_timeout_ms: i32 = 30;
+const max_csi_bytes: usize = 32;
 
 pub const Key = union(enum) {
     char: u21,
@@ -47,8 +49,8 @@ pub const Key = union(enum) {
 };
 
 /// A buffered reader over a raw file descriptor that yields bytes one at a
-/// time. The blocking API refills with `read`; the event-loop API only refills
-/// when the descriptor is readable, leaving incomplete sequences buffered.
+/// time. `next` may block and is used for plain non-tty reads; the decoder uses
+/// readiness checks so incomplete sequences can remain buffered.
 pub const Source = struct {
     fd: sys.Fd,
     buf: [256]u8 = undefined,
@@ -59,25 +61,6 @@ pub const Source = struct {
     pub fn next(self: *Source) !?u8 {
         if (self.eof and self.pos >= self.len) return null;
         if (self.pos >= self.len) {
-            self.len = try sys.read(self.fd, &self.buf);
-            self.pos = 0;
-            if (self.len == 0) self.eof = true;
-        }
-        if (self.len == 0) return null;
-        defer self.pos += 1;
-        return self.buf[self.pos];
-    }
-
-    /// True when bytes are already buffered (so `next` will not read/block).
-    pub fn hasBuffered(self: *const Source) bool {
-        return self.pos < self.len;
-    }
-
-    /// Like `next`, but returns null if no byte arrives within `ms`.
-    pub fn nextTimed(self: *Source, ms: i32) !?u8 {
-        if (self.eof and self.pos >= self.len) return null;
-        if (self.pos >= self.len) {
-            if (!sys.readable(self.fd, ms)) return null;
             self.len = try sys.read(self.fd, &self.buf);
             self.pos = 0;
             if (self.len == 0) self.eof = true;
@@ -116,6 +99,21 @@ pub const Source = struct {
         return self.available().len >= n;
     }
 
+    fn ensureTimed(self: *Source, n: usize, ms: i32) !bool {
+        while (self.available().len < n and !self.eof) {
+            self.compact();
+            if (self.eof or self.len == self.buf.len) break;
+            if (!sys.readable(self.fd, ms)) break;
+            const got = try sys.read(self.fd, self.buf[self.len..]);
+            if (got == 0) {
+                self.eof = true;
+                break;
+            }
+            self.len += got;
+        }
+        return self.available().len >= n;
+    }
+
     fn refillAvailable(self: *Source) !bool {
         self.compact();
         if (self.eof or self.len == self.buf.len) return false;
@@ -143,17 +141,10 @@ pub const Source = struct {
     }
 };
 
-/// Read and decode the next key from `src`.
-pub fn decode(src: *Source) !Key {
-    const b = (try src.next()) orelse return .eof;
-    if (b == 0x1b) return decodeEsc(src);
-    if (b < 0x20 or b == 0x7f) return decodeCtrl(b);
-    return decodeChar(src, b);
-}
-
-/// Decode one complete key without blocking. Returns null when the current
+/// Decode one complete key without an unbounded wait. Returns null when the
 /// buffered bytes are a partial UTF-8 or escape sequence and the descriptor has
-/// no additional bytes ready right now.
+/// no additional bytes ready, except that a lone Escape gets `esc_timeout_ms`
+/// for a possible continuation byte.
 pub fn decodeAvailable(src: *Source) !?Key {
     if (!try src.ensureAvailable(1)) return if (src.ended()) .eof else null;
     const b = src.available()[0];
@@ -165,37 +156,15 @@ pub fn decodeAvailable(src: *Source) !?Key {
     return try decodeCharAvailable(src, b);
 }
 
-fn decodeChar(src: *Source, first: u8) !Key {
-    var buf: [4]u8 = undefined;
-    buf[0] = first;
-    const len = @min(unicode.seqLen(first), buf.len);
-    var i: usize = 1;
-    while (i < len) : (i += 1) {
-        buf[i] = (try src.next()) orelse break;
-    }
-    return .{ .char = unicode.decode(buf[0..i]) };
-}
-
 fn decodeCharAvailable(src: *Source, first: u8) !?Key {
     var buf: [4]u8 = undefined;
     buf[0] = first;
     const len = @min(unicode.seqLen(first), buf.len);
-    if (len == 1) {
-        src.consume(1);
-        return .{ .char = unicode.decode(buf[0..1]) };
-    }
-    if (!try src.ensureAvailable(len)) {
-        if (!src.ended()) return null;
-        const bytes = src.available();
-        const n = @min(bytes.len, len);
-        @memcpy(buf[0..n], bytes[0..n]);
-        src.consume(n);
-        return .{ .char = unicode.decode(buf[0..n]) };
-    }
-    const bytes = src.available()[0..len];
-    @memcpy(buf[0..len], bytes);
-    src.consume(len);
-    return .{ .char = unicode.decode(buf[0..len]) };
+    if (len > 1 and !try src.ensureAvailable(len) and !src.eof) return null;
+    const n = @min(src.available().len, len);
+    @memcpy(buf[0..n], src.available()[0..n]);
+    src.consume(n);
+    return .{ .char = unicode.decode(buf[0..n]) };
 }
 
 fn decodeCtrl(b: u8) Key {
@@ -223,18 +192,13 @@ fn decodeCtrl(b: u8) Key {
     };
 }
 
-fn decodeEsc(src: *Source) !Key {
-    // Wait briefly for a continuation byte; if none comes it is a real Escape.
-    const b = (try src.nextTimed(esc_timeout_ms)) orelse return .escape;
-    return switch (b) {
-        '[' => try decodeCsi(src),
-        'O' => try decodeSs3(src),
-        else => decodeAlt(b),
-    };
-}
-
 fn decodeEscAvailable(src: *Source) !?Key {
     if (!try src.ensureAvailable(2)) {
+        if (src.available().len == 1 and !src.ended()) {
+            _ = try src.ensureTimed(2, esc_timeout_ms);
+        }
+    }
+    if (src.available().len < 2) {
         src.consume(1);
         return .escape;
     }
@@ -259,26 +223,13 @@ fn decodeAlt(b: u8) Key {
     };
 }
 
-fn decodeCsi(src: *Source) !Key {
-    var params: [8]u8 = undefined;
-    var n: usize = 0;
-    while (true) {
-        const b = (try src.next()) orelse return .ignore;
-        if (b >= 0x40 and b <= 0x7e) return csiFinal(b, params[0..n]);
-        if (n < params.len) {
-            params[n] = b;
-            n += 1;
-        }
-    }
-}
-
 fn decodeCsiAvailable(src: *Source) !?Key {
     var params: [8]u8 = undefined;
     var n: usize = 0;
     var i: usize = 2; // ESC [
     while (true) : (i += 1) {
         if (!try src.ensureAvailable(i + 1)) {
-            if (src.ended()) {
+            if (src.eof) {
                 src.consume(src.available().len);
                 return .ignore;
             }
@@ -293,7 +244,7 @@ fn decodeCsiAvailable(src: *Source) !?Key {
             params[n] = b;
             n += 1;
         }
-        if (i >= 31) {
+        if (i + 1 >= max_csi_bytes) {
             src.consume(i + 1);
             return .ignore;
         }
@@ -324,22 +275,9 @@ fn csiTilde(params: []const u8) Key {
     };
 }
 
-fn decodeSs3(src: *Source) !Key {
-    const b = (try src.next()) orelse return .ignore;
-    return switch (b) {
-        'A' => .up,
-        'B' => .down,
-        'C' => .right,
-        'D' => .left,
-        'H' => .home,
-        'F' => .end,
-        else => .ignore,
-    };
-}
-
 fn decodeSs3Available(src: *Source) !?Key {
     if (!try src.ensureAvailable(3)) {
-        if (!src.ended()) return null;
+        if (!src.eof) return null;
         src.consume(src.available().len);
         return .ignore;
     }
@@ -380,7 +318,7 @@ fn decodeBytes(bytes: []const u8) !Key {
     var src = Source{ .fd = sys.invalid };
     @memcpy(src.buf[0..bytes.len], bytes);
     src.len = bytes.len;
-    return decode(&src);
+    return (try decodeAvailable(&src)) orelse error.TestUnexpectedResult;
 }
 
 test "decode control keys and CSI sequences" {
@@ -455,11 +393,13 @@ test "incomplete escape sequences resolve without hanging" {
     const head = "\x1b[";
     @memcpy(src.buf[0..head.len], head);
     src.len = head.len;
+    src.eof = true;
     // CSI introducer with no final byte: input ends -> ignored, not a hang.
-    try std.testing.expect(std.meta.activeTag(try decode(&src)) == .ignore);
+    try std.testing.expect(std.meta.activeTag((try decodeAvailable(&src)).?) == .ignore);
     // A lone ESC at end of input decodes as the Escape key.
     src.buf[0] = 0x1b;
     src.len = 1;
     src.pos = 0;
-    try std.testing.expect(std.meta.activeTag(try decode(&src)) == .escape);
+    src.eof = false;
+    try std.testing.expect(std.meta.activeTag((try decodeAvailable(&src)).?) == .escape);
 }
