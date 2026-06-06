@@ -65,6 +65,7 @@ pub const Editor = struct {
     ) Editor {
         return initTerminal(alloc, cfg, Terminal.init(in_fd, out_fd));
     }
+
     fn initTerminal(alloc: std.mem.Allocator, cfg: config.Config, tty: Terminal) Editor {
         return .{
             .alloc = alloc,
@@ -341,10 +342,9 @@ pub const Editor = struct {
     }
 
     fn currentWord(self: *Editor) []const u8 {
-        const t = self.line.text();
-        var s = self.line.cursor;
-        while (s > 0 and t[s - 1] != ' ' and t[s - 1] != '\t') s -= 1;
-        return t[s..self.line.cursor];
+        const head = self.line.text()[0..self.line.cursor];
+        const s = if (std.mem.lastIndexOfAny(u8, head, " \t")) |i| i + 1 else 0;
+        return head[s..];
     }
 
     fn listComps(self: *Editor, items: []const []const u8) !void {
@@ -360,6 +360,9 @@ pub const Editor = struct {
     }
 
     // --- bracketed paste ---
+
+    /// The end-of-paste marker the terminal sends after a bracketed paste.
+    const paste_end = "\x1b[201~";
 
     fn startPaste(self: *Editor) void {
         self.resetPaste();
@@ -388,13 +391,12 @@ pub const Editor = struct {
     }
 
     fn stepPaste(self: *Editor, b: u8) !bool {
-        const tail = "\x1b[201~";
-        if (b == tail[self.paste_match]) {
+        if (b == paste_end[self.paste_match]) {
             self.paste_match += 1;
-            return self.paste_match == tail.len;
+            return self.paste_match == paste_end.len;
         }
         try self.flushPrefix();
-        if (b == tail[0]) {
+        if (b == paste_end[0]) {
             self.paste_match = 1;
         } else {
             try appendPaste(&self.paste_buf, self.alloc, b);
@@ -403,8 +405,7 @@ pub const Editor = struct {
     }
 
     fn flushPrefix(self: *Editor) !void {
-        const tail = "\x1b[201~";
-        for (tail[0..self.paste_match]) |p| try appendPaste(&self.paste_buf, self.alloc, p);
+        for (paste_end[0..self.paste_match]) |p| try appendPaste(&self.paste_buf, self.alloc, p);
         self.paste_match = 0;
     }
 
@@ -440,8 +441,7 @@ pub const Editor = struct {
                     return .submit;
                 },
                 .restore => {
-                    const saved = self.search_state.?.saved;
-                    try self.line.setText(saved);
+                    try self.line.setText(state.saved);
                     self.clearSearch();
                     return .cont;
                 },
@@ -527,6 +527,7 @@ pub const Editor = struct {
 
     fn viChar(self: *Editor, cp_full: u21) !void {
         if (self.vi_replace) return self.viReplace(cp_full);
+        // Non-ASCII can't be a vi command; 0 falls through every arm to a bell.
         const cp: u8 = if (cp_full < 128) @intCast(cp_full) else 0;
         if ((cp >= '1' and cp <= '9') or (cp == '0' and self.vi_count > 0)) {
             self.vi_count = self.vi_count *| 10 +| (cp - '0'); // saturate, never trap
