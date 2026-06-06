@@ -270,11 +270,8 @@ pub const Editor = struct {
     }
 
     fn apply(self: *Editor, k: key.Key) !Action {
+        self.endCycleFor(k);
         if (try self.interceptKey(k)) return .cont;
-        switch (k) { // any key but Tab/Shift-Tab ends a completion cycle
-            .tab, .backtab => {},
-            else => self.cycle = null,
-        }
         if (self.cfg.editing == .vi and self.vi_normal) return self.viNormalKey(k);
         switch (k) {
             .char => |cp| try self.line.insert(cp),
@@ -322,6 +319,15 @@ pub const Editor = struct {
         self.term.updateSize(); // the window may have changed while stopped
         self.ml_row = 0;
         try self.redraw();
+    }
+
+    /// Search/paste rewrite the line under a completion cycle, so every key
+    /// but Tab/Shift-Tab — intercepted ones included — must end it.
+    fn endCycleFor(self: *Editor, k: key.Key) void {
+        switch (k) {
+            .tab, .backtab => {},
+            else => self.cycle = null,
+        }
     }
 
     /// vi normal mode: history navigation stays an editor concern; everything
@@ -454,6 +460,12 @@ pub const Editor = struct {
     fn cycleStep(self: *Editor, dir: enum { fwd, back }) !void {
         if (self.cycle == null) return self.cycleBegin();
         const c = &self.cycle.?;
+        if (c.shown_len > self.line.cursor) {
+            // The line changed under the cycle (defense in depth; intercepted
+            // keys already clear it): restart rather than slice out of range.
+            self.cycle = null;
+            return self.cycleBegin();
+        }
         const n = c.items.len;
         const next = switch (dir) {
             .fwd => (c.idx + 1) % n,
@@ -949,6 +961,35 @@ test "any other key ends a completion cycle" {
     try typeText(&ed, "x"); // ends the cycle
     try std.testing.expect(ed.cycle == null);
     _ = try ed.apply(.tab); // a fresh cycle completes the new word "commitx"
+    try std.testing.expectEqualStrings("commit", ed.line.text());
+}
+
+test "intercepted keys end a completion cycle" {
+    const dn = try sys.devNull();
+    defer sys.close(dn);
+    const cfg = config.Config{ .complete = twoCompletions, .complete_style = .cycle };
+    var ed = Editor.initFd(std.testing.allocator, cfg, sys.invalid, dn);
+    defer ed.deinit();
+    try typeText(&ed, "com");
+    _ = try ed.apply(.tab); // -> "commit", cycle active
+    try std.testing.expect(ed.cycle != null);
+    // Ctrl-R rewrites the line; a kept cycle would hold stale byte counts
+    // and underflow replaceBack when the new line is shorter.
+    _ = try ed.apply(.search_back);
+    try std.testing.expect(ed.cycle == null);
+    ed.clearSearch();
+}
+
+test "a stale cycle restarts instead of slicing out of range" {
+    const dn = try sys.devNull();
+    defer sys.close(dn);
+    const cfg = config.Config{ .complete = twoCompletions, .complete_style = .cycle };
+    var ed = Editor.initFd(std.testing.allocator, cfg, dn, dn);
+    defer ed.deinit();
+    try typeText(&ed, "com");
+    _ = try ed.apply(.tab); // -> "commit", shown_len 6
+    try ed.line.setText("x"); // the line changed under the cycle
+    _ = try ed.apply(.tab); // must not underflow; restarts from word "x"
     try std.testing.expectEqualStrings("commit", ed.line.text());
 }
 

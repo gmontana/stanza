@@ -103,9 +103,16 @@ pub const History = struct {
         if (self.synced >= self.items.items.len) return;
         const fd = try sys.openAppend(path, 0o600);
         defer sys.close(fd);
+        // One write per entry, newline included: O_APPEND makes each write
+        // land atomically at the end, so a concurrent instance cannot wedge
+        // its entry between this one and its line terminator.
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(self.alloc);
         for (self.items.items[self.synced..]) |e| {
-            try sys.writeAll(fd, e);
-            try sys.writeAll(fd, "\n");
+            buf.clearRetainingCapacity();
+            try buf.appendSlice(self.alloc, e);
+            try buf.append(self.alloc, '\n');
+            try sys.writeAll(fd, buf.items);
         }
         self.synced = self.items.items.len;
     }
