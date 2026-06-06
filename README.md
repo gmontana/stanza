@@ -28,10 +28,12 @@ editing, reverse history search, and multi-line wrapping. Recorded with
 - **Emacs editing too** — Ctrl-A/E, Ctrl-B/F, Alt-B/F by word, Ctrl-W/U/K kill,
   Ctrl-Y yank, Ctrl-T transpose, arrows, Home/End, Delete (always available in
   insert mode; the full keymap when `.editing = .emacs`).
-- **History** — de-duplicated, size-bounded, persists to a file, navigable with
-  Up/Down and searchable with **Ctrl-R** (reverse incremental search).
-- **Completion** — a `Tab` callback; Stanza inserts the longest common prefix or
-  lists candidates.
+- **History** — de-duplicated, size-bounded, persists to a file (truncate or
+  append-merge for concurrent instances), navigable with Up/Down and
+  searchable with **Ctrl-R** (reverse incremental search).
+- **Completion** — a `Tab` callback; Stanza inserts the longest common prefix
+  and lists candidates (capped by `.max_listed`), or set
+  `.complete_style = .cycle` to walk candidates with Tab/Shift-Tab.
 - **Hints** — dim ghost text after the cursor (e.g. suggest the rest of a word).
 - **Syntax highlighting** — a paint callback styles the line as you type.
 - **UTF-8 + display widths** — cursor motion, deletion, and rendering are
@@ -46,6 +48,13 @@ editing, reverse history search, and multi-line wrapping. Recorded with
   line read so pipelines keep working.
 - **Blocking or event-loop driven** — call `prompt`, or drive it from your own
   event loop with `editStart` / `editFeed` / `editStop`.
+- **Async output above the prompt** — `hide()` erases the line being edited so
+  the host can print, `show()` repaints it; `clearScreen()` is the public
+  Ctrl-L.
+- **Job control** — Ctrl-Z restores the terminal and suspends (POSIX); on
+  `fg` the editor re-enters raw mode and repaints the line as it was.
+- **Panic-safe restore** — `restoreTerminal()` is allocator-free and callable
+  from a panic handler, so a crashing host never leaves the shell raw.
 - **Bounded terminal probes** — POSIX width probing uses a timeout.
 
 ## Quick start
@@ -181,8 +190,17 @@ while (true) {
 }
 ```
 
+To print asynchronous output (log lines, job results) while a line is being
+edited, bracket it with `hide`/`show`:
+
+```zig
+try ed.hide(); // erase the prompt row(s)
+std.debug.print("event: build finished\r\n", .{});
+try ed.show(); // repaint the line being edited
+```
+
 See [`examples/async.zig`](examples/async.zig) (`zig build async`) for a runnable
-version with a clock that keeps ticking while you type.
+version with a clock that ticks above the prompt while you type.
 
 By default Stanza does not install signal handlers. If your program owns
 `SIGWINCH`, call `ed.notifyResize()` after observing a resize. For small CLI
@@ -194,8 +212,9 @@ observes a resize.
 
 ```sh
 zig build demo          # interactive showcase: completion, hints, highlight
-zig build async         # the event-loop example
+zig build async         # the event-loop example (ticks print above the prompt)
 zig build wrap          # the multi-line wrapping example (try a narrow window)
+zig build keycodes      # show the raw bytes each key sends (for bug reports)
 zig build test          # unit tests
 zig build test-portable # platform-independent unit tests
 zig build test -Dtarget=x86_64-windows -Dtest-no-exec=true # local Windows compile check
@@ -255,6 +274,12 @@ exe.root_module.addImport("stanza", stanza.module("stanza"));
   closing `ESC [ 2 0 1 ~` (a misbehaving terminal multiplexer, for example)
   leaves the editor in paste mode until the marker arrives or input ends. In
   the event-loop API, `editFeed` returns `.more` while waiting.
+- **Ctrl-Z on Windows.** Job-control suspension is POSIX-only; on Windows the
+  key is ignored.
+- **Runtime reconfiguration.** `ed.cfg` fields (mask, multiline, hints,
+  `complete_style`, …) may be changed between prompts; mid-edit changes apply
+  on the next redraw. Use `ed.history.setMax(n)` to change retention at
+  runtime.
 - **Highlighter contract.** A `paint` callback must emit the same visible
   characters as the input line, adding only zero-width SGR escapes; cursor
   placement assumes it.
