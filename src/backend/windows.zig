@@ -353,12 +353,9 @@ pub fn readable(fd: Fd, ms: i32) bool {
 /// records until a byte-producing key press (or the deadline) arrives.
 fn consoleReadable(fd: Fd, ms: i32) bool {
     const deadline: ?u64 = if (ms < 0) null else GetTickCount64() + @as(u64, @intCast(ms));
+    // The first wait always runs, so a zero timeout still polls the handle.
+    var remaining: DWORD = if (ms < 0) INFINITE else @intCast(ms);
     while (true) {
-        const remaining: DWORD = if (deadline) |d| blk: {
-            const now = GetTickCount64();
-            if (now >= d) return false;
-            break :blk @intCast(@min(d - now, std.math.maxInt(DWORD) - 1));
-        } else INFINITE;
         if (WaitForSingleObject(fd, remaining) != WAIT_OBJECT_0) return false;
         // SAFETY: PeekConsoleInputW fills `got` records before any are read.
         var recs: [16]INPUT_RECORD = undefined;
@@ -375,6 +372,11 @@ fn consoleReadable(fd: Fd, ms: i32) bool {
         // ones we inspected (records are FIFO) and wait again.
         var drained: DWORD = 0;
         if (!ReadConsoleInputW(fd, &recs, got, &drained).toBool()) return true;
+        remaining = if (deadline) |d| blk: {
+            const now = GetTickCount64();
+            if (now >= d) return false; // budget spent draining inert records
+            break :blk @intCast(@min(d - now, std.math.maxInt(DWORD) - 1));
+        } else INFINITE;
     }
 }
 
