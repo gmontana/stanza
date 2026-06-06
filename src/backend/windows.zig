@@ -231,6 +231,7 @@ pub const Terminal = struct {
     }
 
     pub fn updateSize(self: *Terminal) void {
+        // SAFETY: GetConsoleScreenBufferInfo fills the struct before use.
         var info: CONSOLE_SCREEN_BUFFER_INFO = undefined;
         if (!GetConsoleScreenBufferInfo(self.out, &info).toBool()) {
             self.cols = 80;
@@ -288,10 +289,6 @@ pub fn readToEnd(fd: Fd, alloc: std.mem.Allocator, out: *std.ArrayList(u8)) !voi
 
 pub fn close(fd: Fd) void {
     if (fd != invalid) windows.CloseHandle(fd);
-}
-
-pub fn unlink(path: [*:0]const u8) void {
-    std.Io.Dir.cwd().deleteFile(io(), std.mem.span(path)) catch {};
 }
 
 pub fn readable(fd: Fd, ms: i32) bool {

@@ -53,7 +53,7 @@ pub const Key = union(enum) {
 /// readiness checks so incomplete sequences can remain buffered.
 pub const Source = struct {
     fd: sys.Fd,
-    buf: [256]u8 = undefined,
+    buf: [256]u8 = @splat(0),
     len: usize = 0,
     pos: usize = 0,
     eof: bool = false,

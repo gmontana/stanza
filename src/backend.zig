@@ -21,7 +21,6 @@ pub const read = impl.read;
 pub const writeAll = impl.writeAll;
 pub const readToEnd = impl.readToEnd;
 pub const close = impl.close;
-pub const unlink = impl.unlink;
 pub const readable = impl.readable;
 pub const isTty = impl.isTty;
 pub const openRead = impl.openRead;

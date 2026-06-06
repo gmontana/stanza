@@ -14,7 +14,6 @@ pub const read = backend.read;
 pub const writeAll = backend.writeAll;
 pub const readToEnd = backend.readToEnd;
 pub const close = backend.close;
-pub const unlink = backend.unlink;
 pub const readable = backend.readable;
 pub const isTty = backend.isTty;
 pub const openRead = backend.openRead;

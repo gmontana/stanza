@@ -60,7 +60,7 @@ pub const Terminal = struct {
     }
 
     pub fn disableRaw(self: *Terminal) void {
-        if (self.orig) |o| posix.tcsetattr(self.in, .FLUSH, o) catch {};
+        if (self.orig) |o| _ = posix.system.tcsetattr(self.in, .FLUSH, &o);
         self.orig = null;
     }
 
@@ -142,10 +142,6 @@ pub fn close(fd: Fd) void {
     _ = posix.system.close(fd);
 }
 
-pub fn unlink(path: [*:0]const u8) void {
-    _ = posix.system.unlinkat(posix.AT.FDCWD, path, 0);
-}
-
 pub fn readable(fd: Fd, ms: i32) bool {
     var fds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
     return posix.system.poll(&fds, 1, ms) > 0;
@@ -154,6 +150,7 @@ pub fn readable(fd: Fd, ms: i32) bool {
 pub const isTty = isTtyFd;
 
 fn isTtyFd(fd: Fd) bool {
+    // SAFETY: tcgetattr writes the termios struct before any field is read.
     var term: posix.termios = undefined;
     return posix.system.tcgetattr(fd, &term) == 0;
 }
