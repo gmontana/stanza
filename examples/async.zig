@@ -2,9 +2,9 @@
 //!
 //!   zig build async
 //!
-//! It polls stdin with a one-second timeout. On a timeout it bumps an idle
-//! counter (shown in the window title, which does not disturb the line); on
-//! input it feeds the editor. Enter prints the line; Ctrl-D quits.
+//! It waits up to one second for input. On a timeout it bumps an idle counter
+//! (shown in the window title, which does not disturb the line); on input it
+//! feeds the editor. Enter prints the line; Ctrl-D quits.
 
 const std = @import("std");
 const stanza = @import("stanza");
@@ -22,14 +22,9 @@ pub fn main() !void {
 
     var ticks: usize = 0;
     while (true) {
-        var fds = [_]std.posix.pollfd{.{
-            .fd = ed.fd(),
-            .events = std.posix.POLL.IN,
-            .revents = 0,
-        }};
-        if ((std.posix.poll(&fds, 1000) catch 0) == 0) {
+        if (!ed.waitInput(1000)) {
             ticks += 1;
-            std.debug.print("\x1b]2;Stanza — idle {d}s\x07", .{ticks}); // window title
+            std.debug.print("\x1b]2;Stanza - idle {d}s\x07", .{ticks}); // window title
             continue;
         }
         switch (ed.editFeed() catch |err| switch (err) {

@@ -1,20 +1,36 @@
 //! Build graph for Stanza: the importable `stanza` module, per-file unit tests,
 //! the interactive demo, and a `qa` step that checks formatting.
 //!
-//! Entry points: `zig build` (install demo), `zig build test`, `zig build demo`,
-//! `zig build qa`.
+//! Entry points: `zig build` (install demos), `zig build test`,
+//! `zig build test-portable`, `zig build demo`, `zig build qa`.
 
 const std = @import("std");
 
-const sources = [_][]const u8{
-    "src/sys.zig",
+const portable_sources = [_][]const u8{
     "src/unicode.zig",
     "src/config.zig",
-    "src/key.zig",
     "src/line.zig",
+    "src/render.zig",
+};
+
+const posix_sources = [_][]const u8{
+    "src/backend/posix.zig",
+    "src/backend.zig",
+    "src/sys.zig",
+    "src/key.zig",
     "src/history.zig",
     "src/term.zig",
-    "src/render.zig",
+    "src/editor.zig",
+    "src/root.zig",
+};
+
+const windows_sources = [_][]const u8{
+    "src/backend/windows.zig",
+    "src/backend.zig",
+    "src/sys.zig",
+    "src/key.zig",
+    "src/history.zig",
+    "src/term.zig",
     "src/editor.zig",
     "src/root.zig",
 };
@@ -22,6 +38,7 @@ const sources = [_][]const u8{
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const test_no_exec = b.option(bool, "test-no-exec", "Compile tests without running them") orelse false;
 
     const stanza = b.addModule("stanza", .{
         .root_source_file = b.path("src/root.zig"),
@@ -30,16 +47,11 @@ pub fn build(b: *std.Build) void {
     });
 
     const test_step = b.step("test", "Run unit tests");
-    for (sources) |path| {
-        const t = b.addTest(.{
-            .root_module = b.createModule(.{
-                .root_source_file = b.path(path),
-                .target = target,
-                .optimize = optimize,
-            }),
-        });
-        test_step.dependOn(&b.addRunArtifact(t).step);
-    }
+    const portable_step = b.step("test-portable", "Run platform-independent unit tests");
+    addTests(b, target, optimize, portable_step, &portable_sources, test_no_exec);
+    test_step.dependOn(portable_step);
+    const platform_sources = if (target.result.os.tag == .windows) &windows_sources else &posix_sources;
+    addTests(b, target, optimize, test_step, platform_sources, test_no_exec);
 
     const demo = b.addExecutable(.{
         .name = "stanza-demo",
@@ -88,4 +100,28 @@ pub fn build(b: *std.Build) void {
     const fmt = b.addSystemCommand(&.{ "zig", "fmt", "--check", "." });
     const qa_step = b.step("qa", "Check formatting");
     qa_step.dependOn(&fmt.step);
+}
+
+fn addTests(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    step: *std.Build.Step,
+    sources: []const []const u8,
+    no_exec: bool,
+) void {
+    for (sources) |path| {
+        const t = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(path),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        if (no_exec) {
+            step.dependOn(&t.step);
+        } else {
+            step.dependOn(&b.addRunArtifact(t).step);
+        }
+    }
 }

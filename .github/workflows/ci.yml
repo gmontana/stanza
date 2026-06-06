@@ -44,3 +44,45 @@ jobs:
         run: python3 tools/pty_smoke.py
       - name: PTY end-to-end (event loop)
         run: python3 tools/pty_async.py
+
+  windows:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Zig
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = "0.16.0"
+          $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "aarch64" } else { "x86_64" }
+          $name = "zig-$arch-windows-$version"
+          Invoke-WebRequest -Uri "https://ziglang.org/download/$version/$name.zip" -OutFile "$name.zip"
+          Expand-Archive "$name.zip" -DestinationPath .
+          Add-Content -Path $env:GITHUB_PATH -Value "$PWD\$name"
+      - name: Unit tests
+        run: zig build test
+      - name: Unit tests (ReleaseSafe)
+        run: zig build test -Doptimize=ReleaseSafe
+      - name: Formatting
+        run: zig build qa
+      - name: Build demos
+        run: zig build
+      - name: ConPTY end-to-end
+        run: python tools/conpty_smoke.py
+
+  portable-windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Zig
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = "0.16.0"
+          $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "aarch64" } else { "x86_64" }
+          $name = "zig-$arch-windows-$version"
+          Invoke-WebRequest -Uri "https://ziglang.org/download/$version/$name.zip" -OutFile "$name.zip"
+          Expand-Archive "$name.zip" -DestinationPath .
+          Add-Content -Path $env:GITHUB_PATH -Value "$PWD\$name"
+      - name: Portable unit tests
+        run: zig build test-portable

@@ -48,9 +48,9 @@ pub const Key = union(enum) {
 
 /// A buffered reader over a raw file descriptor that yields bytes one at a
 /// time. The blocking API refills with `read`; the event-loop API only refills
-/// when `poll(0)` says bytes are ready, leaving incomplete sequences buffered.
+/// when the descriptor is readable, leaving incomplete sequences buffered.
 pub const Source = struct {
-    fd: std.posix.fd_t,
+    fd: sys.Fd,
     buf: [256]u8 = undefined,
     len: usize = 0,
     pos: usize = 0,
@@ -59,7 +59,7 @@ pub const Source = struct {
     pub fn next(self: *Source) !?u8 {
         if (self.eof and self.pos >= self.len) return null;
         if (self.pos >= self.len) {
-            self.len = try std.posix.read(self.fd, &self.buf);
+            self.len = try sys.read(self.fd, &self.buf);
             self.pos = 0;
             if (self.len == 0) self.eof = true;
         }
@@ -78,7 +78,7 @@ pub const Source = struct {
         if (self.eof and self.pos >= self.len) return null;
         if (self.pos >= self.len) {
             if (!sys.readable(self.fd, ms)) return null;
-            self.len = try std.posix.read(self.fd, &self.buf);
+            self.len = try sys.read(self.fd, &self.buf);
             self.pos = 0;
             if (self.len == 0) self.eof = true;
         }
@@ -120,7 +120,7 @@ pub const Source = struct {
         self.compact();
         if (self.eof or self.len == self.buf.len) return false;
         if (!sys.readable(self.fd, 0)) return false;
-        const n = try std.posix.read(self.fd, self.buf[self.len..]);
+        const n = try sys.read(self.fd, self.buf[self.len..]);
         if (n == 0) {
             self.eof = true;
             return false;
@@ -377,7 +377,7 @@ fn leadingNum(params: []const u8) usize {
 fn decodeBytes(bytes: []const u8) !Key {
     // Pre-fill the buffer so decoding never touches the (unused) descriptor;
     // complete sequences always fit, so no read is attempted.
-    var src = Source{ .fd = -1 };
+    var src = Source{ .fd = sys.invalid };
     @memcpy(src.buf[0..bytes.len], bytes);
     src.len = bytes.len;
     return decode(&src);
@@ -415,7 +415,7 @@ test "decode a multibyte codepoint" {
 }
 
 test "decodeAvailable keeps partial sequences buffered" {
-    var src = Source{ .fd = -1 };
+    var src = Source{ .fd = sys.invalid };
 
     src.buf[0] = 0xc3; // first byte of "é"
     src.len = 1;
@@ -441,7 +441,7 @@ test "decodeAvailable keeps partial sequences buffered" {
 }
 
 test "decodeAvailable resolves a lone escape immediately" {
-    var src = Source{ .fd = -1 };
+    var src = Source{ .fd = sys.invalid };
     src.buf[0] = 0x1b;
     src.len = 1;
     const esc = (try decodeAvailable(&src)) orelse return error.TestUnexpectedResult;
@@ -449,7 +449,7 @@ test "decodeAvailable resolves a lone escape immediately" {
 }
 
 test "incomplete escape sequences resolve without hanging" {
-    const dn = try std.posix.openat(std.posix.AT.FDCWD, "/dev/null", .{ .ACCMODE = .RDONLY }, 0);
+    const dn = try sys.devNull();
     defer sys.close(dn);
     var src = Source{ .fd = dn }; // reads return 0 once the buffer drains
     const head = "\x1b[";

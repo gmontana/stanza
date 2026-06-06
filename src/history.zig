@@ -5,7 +5,6 @@
 //! only the store and the lookups it needs, including reverse search.
 
 const std = @import("std");
-const posix = std.posix;
 const sys = @import("sys.zig");
 
 pub const History = struct {
@@ -57,8 +56,7 @@ pub const History = struct {
     /// Load entries from `path`. A missing file is not an error; anything
     /// else (permissions, bad path) propagates so the host can report it.
     pub fn load(self: *History, path: []const u8) !void {
-        const flags: posix.O = .{ .ACCMODE = .RDONLY };
-        const fd = posix.openat(posix.AT.FDCWD, path, flags, 0) catch |err| switch (err) {
+        const fd = sys.openRead(path) catch |err| switch (err) {
             error.FileNotFound => return,
             else => return err,
         };
@@ -72,8 +70,7 @@ pub const History = struct {
 
     /// Write all entries to `path`, newline-delimited, creating or truncating.
     pub fn save(self: *const History, path: []const u8) !void {
-        const flags: posix.O = .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true };
-        const fd = try posix.openat(posix.AT.FDCWD, path, flags, 0o600);
+        const fd = try sys.openWriteTrunc(path, 0o600);
         defer sys.close(fd);
         for (self.items.items) |e| {
             try sys.writeAll(fd, e);

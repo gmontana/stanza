@@ -1,0 +1,302 @@
+//! Windows console and file-handle backend.
+
+const std = @import("std");
+const windows = std.os.windows;
+
+pub const Fd = windows.HANDLE;
+pub const invalid: Fd = windows.INVALID_HANDLE_VALUE;
+pub const WriteError = error{WriteFailed};
+
+const DWORD = windows.DWORD;
+const UINT = windows.UINT;
+const WORD = windows.WORD;
+const SHORT = windows.SHORT;
+const BOOL = windows.BOOL;
+
+// SAFETY: the Win32 STD_*_HANDLE constants are documented as (DWORD)-10/-11;
+// the bit pattern is the API contract, not arithmetic.
+const STD_INPUT_HANDLE: DWORD = @bitCast(@as(i32, -10));
+const STD_OUTPUT_HANDLE: DWORD = @bitCast(@as(i32, -11));
+const CP_UTF8: UINT = 65001;
+
+const ENABLE_PROCESSED_INPUT: DWORD = 0x0001;
+const ENABLE_LINE_INPUT: DWORD = 0x0002;
+const ENABLE_ECHO_INPUT: DWORD = 0x0004;
+const ENABLE_WINDOW_INPUT: DWORD = 0x0008;
+const ENABLE_MOUSE_INPUT: DWORD = 0x0010;
+const ENABLE_EXTENDED_FLAGS: DWORD = 0x0080;
+const ENABLE_VIRTUAL_TERMINAL_INPUT: DWORD = 0x0200;
+
+const ENABLE_PROCESSED_OUTPUT: DWORD = 0x0001;
+const ENABLE_WRAP_AT_EOL_OUTPUT: DWORD = 0x0002;
+const ENABLE_VIRTUAL_TERMINAL_PROCESSING: DWORD = 0x0004;
+
+const WAIT_OBJECT_0: DWORD = 0x00000000;
+const INFINITE: DWORD = 0xffffffff;
+
+const COORD = extern struct {
+    X: SHORT,
+    Y: SHORT,
+};
+
+const SMALL_RECT = extern struct {
+    Left: SHORT,
+    Top: SHORT,
+    Right: SHORT,
+    Bottom: SHORT,
+};
+
+const CONSOLE_SCREEN_BUFFER_INFO = extern struct {
+    dwSize: COORD,
+    dwCursorPosition: COORD,
+    wAttributes: WORD,
+    srWindow: SMALL_RECT,
+    dwMaximumWindowSize: COORD,
+};
+
+extern "kernel32" fn GetStdHandle(nStdHandle: DWORD) callconv(.winapi) ?Fd;
+extern "kernel32" fn GetConsoleMode(hConsoleHandle: Fd, lpMode: *DWORD) callconv(.winapi) BOOL;
+extern "kernel32" fn SetConsoleMode(hConsoleHandle: Fd, dwMode: DWORD) callconv(.winapi) BOOL;
+extern "kernel32" fn GetConsoleScreenBufferInfo(
+    hConsoleOutput: Fd,
+    lpConsoleScreenBufferInfo: *CONSOLE_SCREEN_BUFFER_INFO,
+) callconv(.winapi) BOOL;
+extern "kernel32" fn ReadFile(
+    hFile: Fd,
+    lpBuffer: *anyopaque,
+    nNumberOfBytesToRead: DWORD,
+    lpNumberOfBytesRead: *DWORD,
+    lpOverlapped: ?*anyopaque,
+) callconv(.winapi) BOOL;
+extern "kernel32" fn WriteFile(
+    hFile: Fd,
+    lpBuffer: *const anyopaque,
+    nNumberOfBytesToWrite: DWORD,
+    lpNumberOfBytesWritten: *DWORD,
+    lpOverlapped: ?*anyopaque,
+) callconv(.winapi) BOOL;
+extern "kernel32" fn WaitForSingleObject(hHandle: Fd, dwMilliseconds: DWORD) callconv(.winapi) DWORD;
+extern "kernel32" fn GetConsoleCP() callconv(.winapi) UINT;
+extern "kernel32" fn SetConsoleCP(wCodePageID: UINT) callconv(.winapi) BOOL;
+extern "kernel32" fn GetConsoleOutputCP() callconv(.winapi) UINT;
+extern "kernel32" fn SetConsoleOutputCP(wCodePageID: UINT) callconv(.winapi) BOOL;
+
+pub fn stdin() Fd {
+    return stdHandle(STD_INPUT_HANDLE);
+}
+
+pub fn stdout() Fd {
+    return stdHandle(STD_OUTPUT_HANDLE);
+}
+
+fn stdHandle(which: DWORD) Fd {
+    const h = GetStdHandle(which) orelse return invalid;
+    return if (h == invalid) invalid else h;
+}
+
+pub const Terminal = struct {
+    in: Fd,
+    out: Fd,
+    orig_in: ?DWORD = null,
+    orig_out: ?DWORD = null,
+    orig_cp: ?UINT = null,
+    orig_out_cp: ?UINT = null,
+    cols: usize = 80,
+
+    pub fn init(in: Fd, out: Fd) Terminal {
+        return .{ .in = in, .out = out };
+    }
+
+    pub fn isTty(self: *const Terminal) bool {
+        return isTtyFd(self.in) and isTtyFd(self.out);
+    }
+
+    pub fn enableRaw(self: *Terminal) !void {
+        if (self.orig_in != null) return;
+
+        var in_mode: DWORD = 0;
+        var out_mode: DWORD = 0;
+        if (!GetConsoleMode(self.in, &in_mode).toBool()) return error.NotATerminal;
+        if (!GetConsoleMode(self.out, &out_mode).toBool()) return error.NotATerminal;
+
+        const raw_in =
+            (in_mode & ~(ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT |
+                ENABLE_WINDOW_INPUT | ENABLE_MOUSE_INPUT)) |
+            ENABLE_EXTENDED_FLAGS |
+            ENABLE_VIRTUAL_TERMINAL_INPUT;
+        const raw_out = out_mode |
+            ENABLE_PROCESSED_OUTPUT |
+            ENABLE_WRAP_AT_EOL_OUTPUT |
+            ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+
+        const cp = GetConsoleCP();
+        const out_cp = GetConsoleOutputCP();
+        _ = SetConsoleCP(CP_UTF8);
+        _ = SetConsoleOutputCP(CP_UTF8);
+        errdefer {
+            _ = SetConsoleCP(cp);
+            _ = SetConsoleOutputCP(out_cp);
+        }
+
+        if (!SetConsoleMode(self.in, raw_in).toBool()) return error.UnsupportedTerminal;
+        errdefer _ = SetConsoleMode(self.in, in_mode);
+
+        if (!SetConsoleMode(self.out, raw_out).toBool()) return error.UnsupportedTerminal;
+
+        self.orig_in = in_mode;
+        self.orig_out = out_mode;
+        self.orig_cp = cp;
+        self.orig_out_cp = out_cp;
+    }
+
+    pub fn disableRaw(self: *Terminal) void {
+        if (self.orig_in) |mode| _ = SetConsoleMode(self.in, mode);
+        if (self.orig_out) |mode| _ = SetConsoleMode(self.out, mode);
+        if (self.orig_cp) |cp| _ = SetConsoleCP(cp);
+        if (self.orig_out_cp) |cp| _ = SetConsoleOutputCP(cp);
+        self.orig_in = null;
+        self.orig_out = null;
+        self.orig_cp = null;
+        self.orig_out_cp = null;
+    }
+
+    pub fn write(self: *Terminal, bytes: []const u8) WriteError!void {
+        try writeAll(self.out, bytes);
+    }
+
+    pub fn bell(self: *Terminal) void {
+        self.write("\x07") catch {};
+    }
+
+    pub fn pasteOn(self: *Terminal) void {
+        self.write("\x1b[?2004h") catch {};
+    }
+
+    pub fn pasteOff(self: *Terminal) void {
+        self.write("\x1b[?2004l") catch {};
+    }
+
+    pub fn cursorShape(self: *Terminal, block: bool) void {
+        self.write(if (block) "\x1b[2 q" else "\x1b[6 q") catch {};
+    }
+
+    pub fn cursorReset(self: *Terminal) void {
+        self.write("\x1b[0 q") catch {};
+    }
+
+    pub fn updateSize(self: *Terminal) void {
+        var info: CONSOLE_SCREEN_BUFFER_INFO = undefined;
+        if (!GetConsoleScreenBufferInfo(self.out, &info).toBool()) {
+            self.cols = 80;
+            return;
+        }
+        const width = @as(i32, info.srWindow.Right) - @as(i32, info.srWindow.Left) + 1;
+        self.cols = if (width > 0) @intCast(width) else 80;
+    }
+};
+
+pub fn read(fd: Fd, out: []u8) !usize {
+    if (out.len == 0) return 0;
+    if (fd == invalid) return error.InvalidHandle;
+    var got: DWORD = 0;
+    const want: DWORD = @intCast(@min(out.len, std.math.maxInt(DWORD)));
+    // SAFETY: ReadFile takes an untyped buffer; out.ptr is valid for `want`
+    // bytes (clamped to out.len above).
+    if (ReadFile(fd, @ptrCast(out.ptr), want, &got, null).toBool()) return got;
+    return switch (windows.GetLastError()) {
+        .BROKEN_PIPE, .HANDLE_EOF, .NO_DATA => 0,
+        .INVALID_HANDLE => error.InvalidHandle,
+        .ACCESS_DENIED => error.AccessDenied,
+        .OPERATION_ABORTED => error.Interrupted,
+        else => error.InputOutput,
+    };
+}
+
+pub fn writeAll(fd: Fd, bytes: []const u8) WriteError!void {
+    var done: usize = 0;
+    while (done < bytes.len) {
+        if (fd == invalid) return error.WriteFailed;
+        const chunk_len = @min(bytes.len - done, std.math.maxInt(DWORD));
+        var wrote: DWORD = 0;
+        if (!WriteFile(
+            fd,
+            // SAFETY: WriteFile takes an untyped buffer valid for `chunk_len` bytes.
+            @ptrCast(bytes[done..].ptr),
+            @intCast(chunk_len),
+            &wrote,
+            null,
+        ).toBool()) return error.WriteFailed;
+        if (wrote == 0) return error.WriteFailed;
+        done += wrote;
+    }
+}
+
+pub fn readToEnd(fd: Fd, alloc: std.mem.Allocator, out: *std.ArrayList(u8)) !void {
+    var chunk: [4096]u8 = undefined;
+    while (true) {
+        const n = try read(fd, &chunk);
+        if (n == 0) break;
+        try out.appendSlice(alloc, chunk[0..n]);
+    }
+}
+
+pub fn close(fd: Fd) void {
+    if (fd != invalid) windows.CloseHandle(fd);
+}
+
+pub fn unlink(path: [*:0]const u8) void {
+    std.Io.Dir.cwd().deleteFile(io(), std.mem.span(path)) catch {};
+}
+
+pub fn readable(fd: Fd, ms: i32) bool {
+    if (fd == invalid) return false;
+    const timeout: DWORD = if (ms < 0) INFINITE else @intCast(ms);
+    return WaitForSingleObject(fd, timeout) == WAIT_OBJECT_0;
+}
+
+pub fn isTty(fd: Fd) bool {
+    return isTtyFd(fd);
+}
+
+fn isTtyFd(fd: Fd) bool {
+    if (fd == invalid) return false;
+    var mode: DWORD = 0;
+    return GetConsoleMode(fd, &mode).toBool();
+}
+
+pub fn openRead(path: []const u8) !Fd {
+    const file = try std.Io.Dir.cwd().openFile(io(), path, .{
+        .mode = .read_only,
+        .allow_directory = false,
+    });
+    return file.handle;
+}
+
+pub fn openWriteTrunc(path: []const u8, mode: u32) !Fd {
+    _ = mode;
+    const file = try std.Io.Dir.cwd().createFile(io(), path, .{
+        .read = false,
+        .truncate = true,
+    });
+    return file.handle;
+}
+
+pub fn devNull() !Fd {
+    const file = try std.Io.Dir.cwd().openFile(io(), "NUL", .{ .mode = .read_write });
+    return file.handle;
+}
+
+pub fn installResize() void {}
+
+pub fn resized() bool {
+    return false;
+}
+
+fn io() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
+test "invalid handle is not readable or a tty" {
+    try std.testing.expect(!readable(invalid, 0));
+    try std.testing.expect(!isTty(invalid));
+}

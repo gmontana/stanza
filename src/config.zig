@@ -109,9 +109,9 @@ pub const Config = struct {
     multiline: bool = false,
     /// When set, render this codepoint in place of every character (passwords).
     mask: ?u21 = null,
-    /// If true, `editStart` installs a process-wide SIGWINCH handler so the
-    /// editor can reflow on resize. Leave false when the host owns signals and
-    /// call `Editor.notifyResize` after observing a resize.
+    /// If true on POSIX, `editStart` installs a process-wide SIGWINCH handler
+    /// so the editor can reflow on resize. Leave false when the host owns
+    /// signals; on Windows, call `Editor.notifyResize` after observing a resize.
     install_resize_handler: bool = false,
     /// Maximum retained history entries.
     max_history: usize = 1000,

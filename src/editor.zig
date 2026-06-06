@@ -8,7 +8,6 @@
 //! caller. History is exposed directly so the host can add, load, and save.
 
 const std = @import("std");
-const posix = std.posix;
 const config = @import("config.zig");
 const key = @import("key.zig");
 const term = @import("term.zig");
@@ -58,7 +57,7 @@ pub const Editor = struct {
     pub const Step = union(enum) { line: []u8, more };
 
     pub fn init(alloc: std.mem.Allocator, cfg: config.Config) Editor {
-        return initFd(alloc, cfg, posix.STDIN_FILENO, posix.STDOUT_FILENO);
+        return initFd(alloc, cfg, sys.stdin(), sys.stdout());
     }
 
     /// Like `init` but with explicit descriptors — e.g. open `/dev/tty` to edit
@@ -66,8 +65,8 @@ pub const Editor = struct {
     pub fn initFd(
         alloc: std.mem.Allocator,
         cfg: config.Config,
-        in_fd: posix.fd_t,
-        out_fd: posix.fd_t,
+        in_fd: sys.Fd,
+        out_fd: sys.Fd,
     ) Editor {
         return .{
             .alloc = alloc,
@@ -103,7 +102,7 @@ pub const Editor = struct {
         while (true) {
             switch (try self.editFeed()) {
                 .line => |l| return l,
-                .more => _ = sys.readable(self.src.fd, -1), // block until input
+                .more => _ = self.waitInput(-1),
             }
         }
     }
@@ -111,7 +110,7 @@ pub const Editor = struct {
     // --- event-loop API ---
 
     /// Begin editing: enter raw mode and draw the prompt, then return. Call
-    /// `editFeed` whenever `fd()` is readable, and `editStop` when done.
+    /// `waitInput` before `editFeed`, and `editStop` when done.
     /// Requires a terminal (use `prompt` for the pipe-friendly path).
     pub fn editStart(self: *Editor, text: []const u8) !void {
         if (self.cfg.install_resize_handler) term.installResize();
@@ -194,14 +193,20 @@ pub const Editor = struct {
         self.term.disableRaw();
     }
 
-    /// Tell the editor that the terminal size changed. This is for programs
-    /// that own SIGWINCH themselves and leave `install_resize_handler` false.
+    /// Tell the editor that the terminal size changed. This is for hosts that
+    /// observe resize events themselves and leave `install_resize_handler` false.
     pub fn notifyResize(self: *Editor) void {
         self.resize_requested = true;
     }
 
-    /// The descriptor to wait on (poll/select) before calling `editFeed`.
-    pub fn fd(self: *const Editor) std.posix.fd_t {
+    /// Wait for input on the editor's descriptor. This is the portable helper
+    /// for event loops that only need to sleep until editing can make progress.
+    pub fn waitInput(self: *const Editor, ms: i32) bool {
+        return sys.readable(self.src.fd, ms);
+    }
+
+    /// The underlying descriptor/handle for hosts with their own event loop.
+    pub fn fd(self: *const Editor) sys.Fd {
         return self.src.fd;
     }
 
@@ -801,24 +806,23 @@ test "longest common prefix" {
     try std.testing.expectEqualStrings("", longestPrefix(&split_codepoint));
 }
 
-fn devNull() !posix.fd_t {
-    return std.posix.openat(std.posix.AT.FDCWD, "/dev/null", .{ .ACCMODE = .RDWR }, 0);
+fn devNull() !sys.Fd {
+    return sys.devNull();
 }
 
-fn openWrite(path: []const u8) !posix.fd_t {
-    const flags: posix.O = .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true };
-    return std.posix.openat(std.posix.AT.FDCWD, path, flags, 0o600);
+fn openWrite(path: []const u8) !sys.Fd {
+    return sys.openWriteTrunc(path, 0o600);
 }
 
-fn openRead(path: []const u8) !posix.fd_t {
-    return std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY }, 0);
+fn openRead(path: []const u8) !sys.Fd {
+    return sys.openRead(path);
 }
 
 fn tmpPath(buf: []u8, tmp: *std.testing.TmpDir, name: []const u8) ![:0]u8 {
     return std.fmt.bufPrintZ(buf, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, name });
 }
 
-fn testEditor(editing: config.Editing, fd_out: posix.fd_t) Editor {
+fn testEditor(editing: config.Editing, fd_out: sys.Fd) Editor {
     return Editor.initFd(std.testing.allocator, .{ .editing = editing }, fd_out, fd_out);
 }
 
@@ -960,7 +964,7 @@ test "unterminated paste keeps the held-back marker prefix as sanitized text" {
 test "editFeed returns during an incomplete paste" {
     const out = try devNull();
     defer sys.close(out);
-    var ed = Editor.initFd(std.testing.allocator, .{ .editing = .emacs }, -1, out);
+    var ed = Editor.initFd(std.testing.allocator, .{ .editing = .emacs }, sys.invalid, out);
     defer ed.deinit();
 
     const first = "\x1b[200~abc";
@@ -1192,7 +1196,7 @@ test "search leaves on EOF instead of spinning" {
 test "editFeed returns during reverse search" {
     const out = try devNull();
     defer sys.close(out);
-    var ed = Editor.initFd(std.testing.allocator, .{ .editing = .emacs }, -1, out);
+    var ed = Editor.initFd(std.testing.allocator, .{ .editing = .emacs }, sys.invalid, out);
     defer ed.deinit();
     try ed.history.add("commit");
 
