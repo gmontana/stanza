@@ -42,6 +42,8 @@ pub const Editor = struct {
     paste_match: usize = 0,
     paste_buf: std.ArrayList(u8) = .empty,
     search_state: ?SearchState = null,
+    active: bool = false,
+    hidden: bool = false,
 
     const Action = enum { cont, submit, cancel, eof };
     const SearchStep = enum { stay, submit, restore, leave };
@@ -130,6 +132,8 @@ pub const Editor = struct {
         self.resetPaste();
         self.clearSearch();
         self.ml_row = 0;
+        self.active = true;
+        self.hidden = false;
         if (self.cfg.editing == .vi) self.term.cursorShape(false);
         self.prompt_text = text;
         try self.redraw();
@@ -181,6 +185,8 @@ pub const Editor = struct {
 
     /// Restore the terminal after `editStart`.
     pub fn editStop(self: *Editor) void {
+        self.active = false;
+        self.hidden = false;
         self.resetPaste();
         self.clearSearch();
         if (self.cfg.editing == .vi) self.term.cursorReset();
@@ -203,6 +209,41 @@ pub const Editor = struct {
     /// The underlying descriptor/handle for hosts with their own event loop.
     pub fn fd(self: *const Editor) sys.Fd {
         return self.src.fd;
+    }
+
+    /// Erase the prompt and line so the host can print its own output above
+    /// it; call `show` to repaint. Painting (including from `editFeed`) stays
+    /// suppressed while hidden, though input keeps being processed. Only
+    /// meaningful between `editStart` and `editStop`; safe to call twice.
+    pub fn hide(self: *Editor) !void {
+        if (!self.active or self.hidden) return;
+        self.hidden = true;
+        self.out_buf.clearRetainingCapacity();
+        if (self.ml_row > 0) { // collapse a wrapped block to its top row
+            try render.appendNum(&self.out_buf, self.alloc, "\x1b[", self.ml_row, "A");
+            self.ml_row = 0;
+        }
+        try self.out_buf.appendSlice(self.alloc, "\r\x1b[J");
+        try self.term.write(self.out_buf.items);
+    }
+
+    /// Repaint the prompt and line after `hide`.
+    pub fn show(self: *Editor) !void {
+        if (!self.active or !self.hidden) return;
+        self.hidden = false;
+        if (self.search_state) |*state| {
+            try self.drawSearch(state.q.items, state.idx == null and state.q.items.len > 0);
+        } else {
+            try self.redraw();
+        }
+    }
+
+    /// Clear the screen and repaint the prompt — what Ctrl-L does, as a
+    /// public entry point for hosts that bind their own `clear` command.
+    pub fn clearScreen(self: *Editor) !void {
+        try self.term.write("\x1b[H\x1b[2J");
+        self.ml_row = 0; // the cursor is home; the block redraws from row 0
+        if (self.active and !self.hidden) try self.redraw();
     }
 
     fn apply(self: *Editor, k: key.Key) !Action {
@@ -230,10 +271,7 @@ pub const Editor = struct {
             .kill_word_fwd => try self.line.killWordFwd(),
             .yank => try self.line.yank(),
             .transpose => self.line.transpose(),
-            .clear => {
-                try self.term.write("\x1b[H\x1b[2J");
-                self.ml_row = 0; // the cursor is home; the block redraws from row 0
-            },
+            .clear => try self.clearScreen(),
             .up => try self.histPrev(),
             .down => try self.histNext(),
             .search_back, .paste_begin => unreachable,
@@ -258,6 +296,7 @@ pub const Editor = struct {
     }
 
     fn redraw(self: *Editor) !void {
+        if (self.hidden) return;
         const args = render.DrawArgs{
             .cols = self.term.cols,
             .alloc = self.alloc,
@@ -348,10 +387,17 @@ pub const Editor = struct {
     }
 
     fn listComps(self: *Editor, items: []const []const u8) !void {
+        if (self.hidden) return;
         try self.term.write("\r\n");
-        for (items) |c| {
+        const shown = @min(items.len, self.cfg.max_listed);
+        for (items[0..shown]) |c| {
             try self.term.write(c);
             try self.term.write("   ");
+        }
+        if (shown < items.len) {
+            self.out_buf.clearRetainingCapacity();
+            try render.appendNum(&self.out_buf, self.alloc, "… (", items.len - shown, " more)");
+            try self.term.write(self.out_buf.items);
         }
         try self.term.write("\r\n");
         // The cursor now sits on a fresh row below the listing; that row is the
@@ -489,6 +535,7 @@ pub const Editor = struct {
     }
 
     fn drawSearch(self: *Editor, q: []const u8, failed: bool) !void {
+        if (self.hidden) return;
         self.out_buf.clearRetainingCapacity();
         const tag = if (failed) "(failed reverse-i-search)`" else "(reverse-i-search)`";
         try self.out_buf.appendSlice(self.alloc, "\r\x1b[J");
@@ -1235,6 +1282,136 @@ test "search display truncates the match to the terminal width" {
     try sys.readToEnd(rfd, std.testing.allocator, &buf);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "abcde") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "abcdef") == null);
+}
+
+fn readBack(alloc: std.mem.Allocator, path: []const u8, out: *std.ArrayList(u8)) !void {
+    const rfd = try openRead(path);
+    defer sys.close(rfd);
+    try sys.readToEnd(rfd, alloc, out);
+}
+
+fn indexIn(hay: []const u8, needle: []const u8) !usize {
+    return std.mem.indexOf(u8, hay, needle) orelse error.TestUnexpectedResult;
+}
+
+test "hide erases the line, suppresses repaints, and show restores it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [128]u8 = undefined;
+    const path = try tmpPath(&path_buf, &tmp, "hide");
+    const out = try openWrite(path);
+    var ed = Editor.initFd(std.testing.allocator, .{}, sys.invalid, out);
+    defer ed.deinit();
+    ed.active = true; // as editStart would, without needing a real tty
+    ed.prompt_text = "> ";
+    try ed.line.setText("abc");
+    try ed.hide();
+    try ed.hide(); // idempotent: must not erase twice
+    try std.testing.expect(ed.hidden);
+    // A key arrives while hidden: state advances, nothing is painted.
+    ed.src.buf[0] = 'x';
+    ed.src.len = 1;
+    ed.src.pos = 0;
+    switch (try ed.editFeed()) {
+        .more => {},
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqualStrings("abcx", ed.line.text());
+    try ed.show();
+    try std.testing.expect(!ed.hidden);
+    sys.close(out);
+    var got: std.ArrayList(u8) = .empty;
+    defer got.deinit(std.testing.allocator);
+    try readBack(std.testing.allocator, path, &got);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, got.items, "\r\x1b[J"));
+    const erase_at = try indexIn(got.items, "\r\x1b[J");
+    const paint_at = try indexIn(got.items, "> abcx");
+    try std.testing.expect(paint_at > erase_at); // repaint only after show()
+}
+
+test "multiline hide collapses to the block top first" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [128]u8 = undefined;
+    const path = try tmpPath(&path_buf, &tmp, "mlhide");
+    const out = try openWrite(path);
+    var ed = Editor.initFd(std.testing.allocator, .{ .multiline = true }, sys.invalid, out);
+    defer ed.deinit();
+    ed.active = true;
+    ed.ml_row = 2; // cursor sat on row 2 of a wrapped block
+    try ed.hide();
+    try std.testing.expectEqual(@as(usize, 0), ed.ml_row);
+    sys.close(out);
+    var got: std.ArrayList(u8) = .empty;
+    defer got.deinit(std.testing.allocator);
+    try readBack(std.testing.allocator, path, &got);
+    const up_at = try indexIn(got.items, "\x1b[2A");
+    const erase_at = try indexIn(got.items, "\r\x1b[J");
+    try std.testing.expect(up_at < erase_at);
+}
+
+test "clearScreen homes, clears, and repaints" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [128]u8 = undefined;
+    const path = try tmpPath(&path_buf, &tmp, "cls");
+    const out = try openWrite(path);
+    var ed = Editor.initFd(std.testing.allocator, .{}, sys.invalid, out);
+    defer ed.deinit();
+    ed.active = true;
+    ed.prompt_text = "> ";
+    try ed.line.setText("hi");
+    ed.ml_row = 3;
+    try ed.clearScreen();
+    try std.testing.expectEqual(@as(usize, 0), ed.ml_row);
+    sys.close(out);
+    var got: std.ArrayList(u8) = .empty;
+    defer got.deinit(std.testing.allocator);
+    try readBack(std.testing.allocator, path, &got);
+    const cls_at = try indexIn(got.items, "\x1b[H\x1b[2J");
+    const paint_at = try indexIn(got.items, "> hi");
+    try std.testing.expect(paint_at > cls_at);
+}
+
+test "completion listing caps at max_listed" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [128]u8 = undefined;
+    const path = try tmpPath(&path_buf, &tmp, "cap");
+    const out = try openWrite(path);
+    const dn = try sys.devNull();
+    defer sys.close(dn);
+    const cfg = config.Config{ .complete = forkCompletions, .max_listed = 1 };
+    var ed = Editor.initFd(std.testing.allocator, cfg, dn, out);
+    defer ed.deinit();
+    try typeText(&ed, "co");
+    _ = try ed.apply(.tab);
+    sys.close(out);
+    var got: std.ArrayList(u8) = .empty;
+    defer got.deinit(std.testing.allocator);
+    try readBack(std.testing.allocator, path, &got);
+    try std.testing.expect(std.mem.indexOf(u8, got.items, "commit") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got.items, "(1 more)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got.items, "config") == null);
+}
+
+test "show repaints the search display when hidden during search" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [128]u8 = undefined;
+    const path = try tmpPath(&path_buf, &tmp, "shsearch");
+    const out = try openWrite(path);
+    var ed = Editor.initFd(std.testing.allocator, .{}, sys.invalid, out);
+    defer ed.deinit();
+    ed.active = true;
+    try ed.startSearch(); // first draw
+    try ed.hide();
+    try ed.show(); // must repaint the search row, not the plain prompt
+    sys.close(out);
+    var got: std.ArrayList(u8) = .empty;
+    defer got.deinit(std.testing.allocator);
+    try readBack(std.testing.allocator, path, &got);
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, got.items, "reverse-i-search"));
 }
 
 test "completion lists candidates when there is nothing more to insert" {

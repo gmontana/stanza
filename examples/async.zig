@@ -2,9 +2,10 @@
 //!
 //!   zig build async
 //!
-//! It waits up to one second for input. On a timeout it bumps an idle counter
-//! (shown in the window title, which does not disturb the line); on input it
-//! feeds the editor. Enter prints the line; Ctrl-D quits.
+//! It waits up to one second for input. On a timeout it prints a tick line
+//! *above* the prompt with `hide`/`show` — the pattern for any host that
+//! emits asynchronous output while a line is being edited. On input it feeds
+//! the editor. Enter prints the line; Ctrl-D quits.
 
 const std = @import("std");
 const stanza = @import("stanza");
@@ -24,7 +25,9 @@ pub fn main() !void {
     while (true) {
         if (!ed.waitInput(1000)) {
             ticks += 1;
-            std.debug.print("\x1b]2;Stanza - idle {d}s\x07", .{ticks}); // window title
+            try ed.hide(); // erase the prompt row(s)...
+            std.debug.print("tick: idle {d}s\r\n", .{ticks}); // ...print above them...
+            try ed.show(); // ...and repaint the line being edited
             continue;
         }
         switch (ed.editFeed() catch |err| switch (err) {

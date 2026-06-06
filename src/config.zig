@@ -109,6 +109,10 @@ pub const Config = struct {
     multiline: bool = false,
     /// When set, render this codepoint in place of every character (passwords).
     mask: ?u21 = null,
+    /// Cap on completion candidates printed by a Tab listing; the remainder
+    /// is summarized as "… (N more)" so huge candidate sets cannot flood the
+    /// screen.
+    max_listed: usize = 100,
     /// If true on POSIX, `editStart` installs a process-wide SIGWINCH handler
     /// so the editor can reflow on resize. Leave false when the host owns
     /// signals; on Windows, call `Editor.notifyResize` after observing a resize.
