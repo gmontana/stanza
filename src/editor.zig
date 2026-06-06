@@ -8,6 +8,7 @@
 //! History is exposed directly so the host can add, load, and save.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const config = @import("config.zig");
 const key = @import("key.zig");
 const sys = @import("sys.zig");
@@ -247,7 +248,7 @@ pub const Editor = struct {
     }
 
     fn apply(self: *Editor, k: key.Key) !Action {
-        if (try self.startInputMode(k)) return .cont;
+        if (try self.interceptKey(k)) return .cont;
         if (self.cfg.editing == .vi and self.vi_normal) return self.viNormal(k);
         switch (k) {
             .char => |cp| try self.line.insert(cp),
@@ -274,25 +275,38 @@ pub const Editor = struct {
             .clear => try self.clearScreen(),
             .up => try self.histPrev(),
             .down => try self.histNext(),
-            .search_back, .paste_begin => unreachable,
+            .search_back, .paste_begin, .suspend_proc => unreachable,
             .escape => if (self.cfg.editing == .vi) self.enterNormal(),
             .backtab, .ignore => {},
         }
         return .cont;
     }
 
-    fn startInputMode(self: *Editor, k: key.Key) !bool {
+    /// Ctrl-Z: hand the terminal back, stop like a cooked-mode program
+    /// would, and rebuild the editing state when the shell resumes us.
+    fn suspendProc(self: *Editor) !void {
+        self.editStop();
+        sys.raiseStop();
+        // Execution continues here after SIGCONT.
+        try self.term.enableRaw();
+        self.term.pasteOn();
+        self.active = true;
+        if (self.cfg.editing == .vi) self.term.cursorShape(self.vi_normal);
+        self.term.updateSize(); // the window may have changed while stopped
+        self.ml_row = 0;
+        try self.redraw();
+    }
+
+    /// Keys handled before mode dispatch: they apply in every editing mode
+    /// (insert, vi normal) alike.
+    fn interceptKey(self: *Editor, k: key.Key) !bool {
         switch (k) {
-            .search_back => {
-                try self.startSearch();
-                return true;
-            },
-            .paste_begin => {
-                self.startPaste();
-                return true;
-            },
+            .search_back => try self.startSearch(),
+            .paste_begin => self.startPaste(),
+            .suspend_proc => if (builtin.os.tag != .windows) try self.suspendProc(),
             else => return false,
         }
+        return true;
     }
 
     fn redraw(self: *Editor) !void {

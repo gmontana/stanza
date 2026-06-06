@@ -354,6 +354,9 @@ pub fn resized() bool {
     return false;
 }
 
+/// Job-control suspension does not exist on Windows; Ctrl-Z is ignored.
+pub fn raiseStop() void {}
+
 fn io() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
 }

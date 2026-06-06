@@ -183,6 +183,13 @@ pub fn resized() bool {
     return resize_flag.swap(false, .seq_cst);
 }
 
+/// Stop this process like a cooked-mode program would on Ctrl-Z. The caller
+/// restores the terminal first; execution resumes after SIGCONT. Goes through
+/// the syscall layer: there is nothing to do about a failed stop request.
+pub fn raiseStop() void {
+    _ = posix.system.kill(posix.system.getpid(), posix.SIG.TSTP);
+}
+
 fn readCol(fd: Fd) !usize {
     var buf: [32]u8 = undefined;
     var n: usize = 0;

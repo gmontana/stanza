@@ -21,3 +21,4 @@ pub const openWriteTrunc = backend.openWriteTrunc;
 pub const devNull = backend.devNull;
 pub const installResize = backend.installResize;
 pub const resized = backend.resized;
+pub const raiseStop = backend.raiseStop;

@@ -44,6 +44,8 @@ jobs:
         run: python3 tools/pty_smoke.py
       - name: PTY end-to-end (event loop)
         run: python3 tools/pty_async.py
+      - name: PTY end-to-end (suspend/resume)
+        run: python3 tools/pty_suspend.py
 
   windows:
     runs-on: windows-2025

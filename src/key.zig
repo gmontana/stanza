@@ -43,6 +43,7 @@ pub const Key = union(enum) {
     paste_begin,
     interrupt,
     cancel,
+    suspend_proc,
     escape,
     ignore,
     eof,
@@ -188,6 +189,7 @@ fn decodeCtrl(b: u8) Key {
         0x07 => .cancel,
         0x03 => .interrupt,
         0x04 => .ctrl_d,
+        0x1a => .suspend_proc,
         else => .ignore,
     };
 }
@@ -343,6 +345,7 @@ test "decode control keys and CSI sequences" {
     try std.testing.expect(tag(try decodeBytes("\x1bOC")) == .right); // SS3 right
     try std.testing.expect(tag(try decodeBytes("\x1b[Z")) == .backtab);
     try std.testing.expect(tag(try decodeBytes("\x04")) == .ctrl_d);
+    try std.testing.expect(tag(try decodeBytes("\x1a")) == .suspend_proc); // Ctrl-Z
 }
 
 test "decode a multibyte codepoint" {

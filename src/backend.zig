@@ -28,3 +28,4 @@ pub const openWriteTrunc = impl.openWriteTrunc;
 pub const devNull = impl.devNull;
 pub const installResize = impl.installResize;
 pub const resized = impl.resized;
+pub const raiseStop = impl.raiseStop;
