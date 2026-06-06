@@ -156,7 +156,7 @@ pub const Editor = struct {
                 if (try self.stepFromAction(action)) |step| return step;
                 continue;
             }
-            const decoded = (try key.decodeAvailable(&self.src)) orelse break;
+            const decoded = (try key.decode(&self.src)) orelse break;
             if (try self.stepFromAction(try self.apply(decoded))) |step| return step;
         }
         if (redraw_prompt) try self.redraw();
@@ -380,7 +380,7 @@ pub const Editor = struct {
             }
         }
         if (self.src.ended()) {
-            try self.flushPastePrefix();
+            try self.flushPrefix();
             try self.finishPaste();
             return true;
         }
@@ -393,7 +393,7 @@ pub const Editor = struct {
             self.paste_match += 1;
             return self.paste_match == tail.len;
         }
-        try self.flushPastePrefix();
+        try self.flushPrefix();
         if (b == tail[0]) {
             self.paste_match = 1;
         } else {
@@ -402,7 +402,7 @@ pub const Editor = struct {
         return false;
     }
 
-    fn flushPastePrefix(self: *Editor) !void {
+    fn flushPrefix(self: *Editor) !void {
         const tail = "\x1b[201~";
         for (tail[0..self.paste_match]) |p| try appendPaste(&self.paste_buf, self.alloc, p);
         self.paste_match = 0;
@@ -429,7 +429,7 @@ pub const Editor = struct {
 
     fn feedSearch(self: *Editor) !?Action {
         while (true) {
-            const k = (try key.decodeAvailable(&self.src)) orelse return null;
+            const k = (try key.decode(&self.src)) orelse return null;
             const state = if (self.search_state) |*state| state else return .cont;
             const step = try self.searchKey(k, &state.q, &state.idx);
             switch (step) {

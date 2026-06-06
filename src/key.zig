@@ -145,18 +145,18 @@ pub const Source = struct {
 /// buffered bytes are a partial UTF-8 or escape sequence and the descriptor has
 /// no additional bytes ready, except that a lone Escape gets `esc_timeout_ms`
 /// for a possible continuation byte.
-pub fn decodeAvailable(src: *Source) !?Key {
+pub fn decode(src: *Source) !?Key {
     if (!try src.ensureAvailable(1)) return if (src.ended()) .eof else null;
     const b = src.available()[0];
-    if (b == 0x1b) return decodeEscAvailable(src);
+    if (b == 0x1b) return decodeEsc(src);
     if (b < 0x20 or b == 0x7f) {
         src.consume(1);
         return decodeCtrl(b);
     }
-    return try decodeCharAvailable(src, b);
+    return try decodeChar(src, b);
 }
 
-fn decodeCharAvailable(src: *Source, first: u8) !?Key {
+fn decodeChar(src: *Source, first: u8) !?Key {
     var buf: [4]u8 = undefined;
     buf[0] = first;
     const len = @min(unicode.seqLen(first), buf.len);
@@ -192,7 +192,7 @@ fn decodeCtrl(b: u8) Key {
     };
 }
 
-fn decodeEscAvailable(src: *Source) !?Key {
+fn decodeEsc(src: *Source) !?Key {
     if (!try src.ensureAvailable(2)) {
         if (src.available().len == 1 and !src.ended()) {
             _ = try src.ensureTimed(2, esc_timeout_ms);
@@ -204,8 +204,8 @@ fn decodeEscAvailable(src: *Source) !?Key {
     }
     const b = src.available()[1];
     return switch (b) {
-        '[' => try decodeCsiAvailable(src),
-        'O' => try decodeSs3Available(src),
+        '[' => try decodeCsi(src),
+        'O' => try decodeSs3(src),
         else => {
             src.consume(2);
             return decodeAlt(b);
@@ -223,7 +223,7 @@ fn decodeAlt(b: u8) Key {
     };
 }
 
-fn decodeCsiAvailable(src: *Source) !?Key {
+fn decodeCsi(src: *Source) !?Key {
     var params: [8]u8 = undefined;
     var n: usize = 0;
     var i: usize = 2; // ESC [
@@ -275,7 +275,7 @@ fn csiTilde(params: []const u8) Key {
     };
 }
 
-fn decodeSs3Available(src: *Source) !?Key {
+fn decodeSs3(src: *Source) !?Key {
     if (!try src.ensureAvailable(3)) {
         if (!src.eof) return null;
         src.consume(src.available().len);
@@ -318,7 +318,7 @@ fn decodeBytes(bytes: []const u8) !Key {
     var src = Source{ .fd = sys.invalid };
     @memcpy(src.buf[0..bytes.len], bytes);
     src.len = bytes.len;
-    return (try decodeAvailable(&src)) orelse error.TestUnexpectedResult;
+    return (try decode(&src)) orelse error.TestUnexpectedResult;
 }
 
 test "decode control keys and CSI sequences" {
@@ -352,16 +352,16 @@ test "decode a multibyte codepoint" {
     }
 }
 
-test "decodeAvailable keeps partial sequences buffered" {
+test "decode keeps partial sequences buffered" {
     var src = Source{ .fd = sys.invalid };
 
     src.buf[0] = 0xc3; // first byte of "é"
     src.len = 1;
-    try std.testing.expect((try decodeAvailable(&src)) == null);
+    try std.testing.expect((try decode(&src)) == null);
     try std.testing.expectEqual(@as(usize, 0), src.pos);
     src.buf[1] = 0xa9;
     src.len = 2;
-    switch ((try decodeAvailable(&src)) orelse return error.TestUnexpectedResult) {
+    switch ((try decode(&src)) orelse return error.TestUnexpectedResult) {
         .char => |cp| try std.testing.expectEqual(@as(u21, 0xE9), cp),
         else => return error.TestUnexpectedResult,
     }
@@ -370,19 +370,19 @@ test "decodeAvailable keeps partial sequences buffered" {
     @memcpy(src.buf[0..csi.len], csi);
     src.len = csi.len;
     src.pos = 0;
-    try std.testing.expect((try decodeAvailable(&src)) == null);
+    try std.testing.expect((try decode(&src)) == null);
     try std.testing.expectEqual(@as(usize, 0), src.pos);
     src.buf[csi.len] = 'D';
     src.len = csi.len + 1;
-    const left = (try decodeAvailable(&src)) orelse return error.TestUnexpectedResult;
+    const left = (try decode(&src)) orelse return error.TestUnexpectedResult;
     try std.testing.expect(std.meta.activeTag(left) == .left);
 }
 
-test "decodeAvailable resolves a lone escape immediately" {
+test "decode resolves a lone escape immediately" {
     var src = Source{ .fd = sys.invalid };
     src.buf[0] = 0x1b;
     src.len = 1;
-    const esc = (try decodeAvailable(&src)) orelse return error.TestUnexpectedResult;
+    const esc = (try decode(&src)) orelse return error.TestUnexpectedResult;
     try std.testing.expect(std.meta.activeTag(esc) == .escape);
 }
 
@@ -395,11 +395,11 @@ test "incomplete escape sequences resolve without hanging" {
     src.len = head.len;
     src.eof = true;
     // CSI introducer with no final byte: input ends -> ignored, not a hang.
-    try std.testing.expect(std.meta.activeTag((try decodeAvailable(&src)).?) == .ignore);
+    try std.testing.expect(std.meta.activeTag((try decode(&src)).?) == .ignore);
     // A lone ESC at end of input decodes as the Escape key.
     src.buf[0] = 0x1b;
     src.len = 1;
     src.pos = 0;
     src.eof = false;
-    try std.testing.expect(std.meta.activeTag((try decodeAvailable(&src)).?) == .escape);
+    try std.testing.expect(std.meta.activeTag((try decode(&src)).?) == .escape);
 }
