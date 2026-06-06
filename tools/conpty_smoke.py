@@ -184,7 +184,8 @@ class Conpty:
             close(out_write)
 
         si = self._startup_info()
-        cmd = ctypes.create_unicode_buffer(f'"{self.exe}"')
+        shell = os.environ.get("ComSpec", r"C:\Windows\System32\cmd.exe")
+        cmd = ctypes.create_unicode_buffer(f'"{shell}" /d /c ""{self.exe}""')
         flags = 0x00080000  # EXTENDED_STARTUPINFO_PRESENT
         check(
             kernel32.CreateProcessW(
@@ -192,7 +193,7 @@ class Conpty:
                 cmd,
                 None,
                 None,
-                True,
+                False,
                 flags,
                 None,
                 None,
@@ -325,6 +326,9 @@ def main() -> int:
         for name, passed in checks.items():
             print(f"[{'ok' if passed else 'FAIL'}] {name}")
             ok = ok and passed
+        if not ok:
+            tail = bytes(cp.buf[-1000:]).decode("utf-8", "replace")
+            print(f"[debug] captured ConPTY tail: {tail!r}")
     finally:
         cp.stop()
     return 0 if ok else 1
