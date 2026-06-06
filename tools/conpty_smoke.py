@@ -3,8 +3,9 @@
 
     zig build && python tools/conpty_smoke.py
 
-The script exercises the raw Windows console path, not the plain pipe fallback:
-completion, submit, reverse search, vi editing, and clean exit.
+The script exercises the raw Windows console path, not the plain pipe fallback.
+It checks terminal rendering through ConPTY and submitted lines through the demo
+history file, since stderr may be captured by the CI host outside ConPTY.
 """
 
 import ctypes
@@ -309,26 +310,29 @@ def main() -> int:
         cp.send(b"0dw")
         cp.send(b"\r")
         cp.send(b"quit\r")
-        cp.wait_for("bye.")
         if kernel32.WaitForSingleObject(cp.pi.hProcess, 5000) != WAIT_OBJECT_0:
             raise RuntimeError("demo did not exit after quit")
 
         text = bytes(cp.buf).decode("utf-8", "replace")
+        history = HIST.read_text(encoding="utf-8").splitlines() if HIST.exists() else []
+        expected_history = ["commit", "commit", "world", "bar", "quit"]
         checks = {
             "completion renders commit": "commit" in text,
-            "typed commit submitted": "ran: git commit" in text,
+            "typed commit submitted": len(history) >= 1 and history[0] == "commit",
             "reverse search prompt shown": "reverse-i-search" in text,
-            "commit recalled via Ctrl-R": text.count("ran: git commit") >= 2,
-            "vi I inserts at start": "ran: git world" in text,
-            "vi dw deletes word": "ran: git bar" in text,
-            "clean exit": "bye." in text,
+            "commit recalled via Ctrl-R": len(history) >= 2 and history[1] == "commit",
+            "vi I inserts at start": len(history) >= 3 and history[2] == "world",
+            "vi dw deletes word": len(history) >= 4 and history[3] == "bar",
+            "clean exit": history == expected_history,
         }
         for name, passed in checks.items():
             print(f"[{'ok' if passed else 'FAIL'}] {name}")
             ok = ok and passed
         if not ok:
             tail = bytes(cp.buf[-1000:]).decode("utf-8", "replace")
-            print(f"[debug] captured ConPTY tail: {tail!r}")
+            escaped_tail = tail.encode("unicode_escape", "backslashreplace").decode("ascii")
+            print(f"[debug] captured ConPTY tail: {escaped_tail}")
+            print(f"[debug] history: {history!r}")
     finally:
         cp.stop()
     return 0 if ok else 1
