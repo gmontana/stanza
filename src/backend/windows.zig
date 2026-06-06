@@ -364,7 +364,10 @@ fn consoleReadable(fd: Fd, ms: i32) bool {
         var recs: [16]INPUT_RECORD = undefined;
         var got: DWORD = 0;
         if (!PeekConsoleInputW(fd, &recs, recs.len, &got).toBool()) return true;
-        if (got == 0) return false;
+        // Signaled with no records: VT-translated bytes are waiting in the
+        // console's byte buffer (ConPTY feeds input that way), which the
+        // record queue cannot see. ReadFile will not block.
+        if (got == 0) return true;
         for (recs[0..got]) |r| {
             if (producesBytes(r)) return true;
         }
