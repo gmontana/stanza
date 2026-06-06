@@ -31,13 +31,12 @@ pub fn main() !void {
     defer ed.deinit();
 
     const history_file = ".stanza_demo_history";
-    ed.history.load(history_file) catch {};
+    ed.history.load(history_file) catch |err| {
+        std.log.warn("history load failed: {s}", .{@errorName(err)});
+    };
 
-    std.debug.print(
-        "Stanza demo — vi keys: type, Esc for normal mode (hjkl/w/b/x/dw/A…).\n" ++
-            "Tab completes, Ctrl-R searches history, Ctrl-D quits.\n",
-        .{},
-    );
+    try ed.term.write("Stanza demo — vi keys: type, Esc for normal mode (hjkl/w/b/x/dw/A…).\n" ++
+        "Tab completes, Ctrl-R searches history, Ctrl-D quits.\n");
     while (true) {
         const line = ed.prompt("git ❯ ") catch |err| switch (err) {
             error.Eof => break,
@@ -48,10 +47,14 @@ pub fn main() !void {
         if (line.len == 0) continue;
         try ed.history.add(line);
         if (std.mem.eql(u8, line, "quit") or std.mem.eql(u8, line, "exit")) break;
-        std.debug.print("  ↳ ran: git {s}\n", .{line});
+        try ed.term.write("  ↳ ran: git ");
+        try ed.term.write(line);
+        try ed.term.write("\n");
     }
-    ed.history.save(history_file) catch {};
-    std.debug.print("bye.\n", .{});
+    ed.history.save(history_file) catch |err| {
+        std.log.warn("history save failed: {s}", .{@errorName(err)});
+    };
+    try ed.term.write("bye.\n");
 }
 
 fn complete(_: ?*anyopaque, word: []const u8, out: *stanza.Completions) anyerror!void {

@@ -17,7 +17,7 @@ pub fn main() !void {
     });
     defer ed.deinit();
 
-    std.debug.print("multi-line demo — type a long line; Ctrl-D quits.\n", .{});
+    try ed.term.write("multi-line demo — type a long line; Ctrl-D quits.\n");
     while (true) {
         const line = ed.prompt("wrap ❯ ") catch |err| switch (err) {
             error.Eof => break,
@@ -26,6 +26,11 @@ pub fn main() !void {
         };
         defer alloc.free(line);
         if (std.mem.eql(u8, line, "quit")) break;
-        std.debug.print("  ↳ {d} bytes\r\n", .{line.len});
+        try writeFmt(&ed, "  ↳ {d} bytes\r\n", .{line.len});
     }
+}
+
+fn writeFmt(ed: *stanza.Editor, comptime fmt: []const u8, args: anytype) !void {
+    var buf: [64]u8 = undefined;
+    try ed.term.write(try std.fmt.bufPrint(&buf, fmt, args));
 }

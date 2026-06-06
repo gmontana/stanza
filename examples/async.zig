@@ -26,7 +26,7 @@ pub fn main() !void {
         if (!ed.waitInput(1000)) {
             ticks += 1;
             try ed.hide(); // erase the prompt row(s)...
-            std.debug.print("tick: idle {d}s\r\n", .{ticks}); // ...print above them...
+            try writeFmt(&ed, "tick: idle {d}s\r\n", .{ticks}); // ...print above them...
             try ed.show(); // ...and repaint the line being edited
             continue;
         }
@@ -36,11 +36,18 @@ pub fn main() !void {
         }) {
             .line => |line| {
                 defer alloc.free(line);
-                std.debug.print("ran after {d}s idle: {s}\r\n", .{ ticks, line });
+                try writeFmt(&ed, "ran after {d}s idle: ", .{ticks});
+                try ed.term.write(line);
+                try ed.term.write("\r\n");
                 ticks = 0;
                 try ed.editStart("async ❯ ");
             },
             .more => {},
         }
     }
+}
+
+fn writeFmt(ed: *stanza.Editor, comptime fmt: []const u8, args: anytype) !void {
+    var buf: [128]u8 = undefined;
+    try ed.term.write(try std.fmt.bufPrint(&buf, fmt, args));
 }
