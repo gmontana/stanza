@@ -154,6 +154,9 @@ var ed = stanza.Editor.init(alloc, .{
 
 The highlighter must keep the visible characters identical to the input and add
 only zero-width SGR escapes; it applies when the whole line fits on screen.
+Text returned by callbacks — completion candidates, hints, and painted spans —
+is trusted application output and should be valid UTF-8. Stanza copies or emits
+it as provided.
 
 ## Event Loop API
 

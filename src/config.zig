@@ -29,6 +29,7 @@ pub const Style = struct {
 };
 
 /// Ghost text shown after the cursor when it sits at the end of the line.
+/// Callback text is trusted application output and should be valid UTF-8.
 pub const Hint = struct {
     text: []const u8,
     style: Style = .{ .color = .gray },
@@ -40,7 +41,8 @@ pub const Completions = struct {
     items: std.ArrayList([]const u8) = .empty,
     arena: std.mem.Allocator,
 
-    /// Add one candidate; the text is copied into the arena.
+    /// Add one candidate; the text is copied into the arena as provided.
+    /// Candidate text is trusted application output and should be valid UTF-8.
     pub fn add(self: *Completions, text: []const u8) !void {
         try self.items.append(self.arena, try self.arena.dupe(u8, text));
     }
@@ -52,12 +54,12 @@ pub const Painter = struct {
     buf: *std.ArrayList(u8),
     alloc: std.mem.Allocator,
 
-    /// Append text with no styling.
+    /// Append trusted UTF-8 text with no styling.
     pub fn plain(self: *Painter, text: []const u8) !void {
         try self.buf.appendSlice(self.alloc, text);
     }
 
-    /// Append text wrapped in the given style, then reset.
+    /// Append trusted UTF-8 text wrapped in the given style, then reset.
     pub fn put(self: *Painter, text: []const u8, style: Style) !void {
         try self.openSgr(style);
         try self.buf.appendSlice(self.alloc, text);
@@ -127,3 +129,14 @@ pub const Config = struct {
     /// Maximum retained history entries.
     max_history: usize = 1000,
 };
+
+test "completion candidates are copied as trusted bytes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var comps = Completions{ .arena = arena.allocator() };
+
+    try comps.add("ok\xff");
+
+    try std.testing.expectEqual(@as(usize, 1), comps.items.items.len);
+    try std.testing.expectEqualStrings("ok\xff", comps.items.items[0]);
+}
