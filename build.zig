@@ -97,6 +97,20 @@ pub fn build(b: *std.Build) void {
     const wrap_step = b.step("wrap", "Run the multi-line wrapping example");
     wrap_step.dependOn(&run_wrap.step);
 
+    const keycodes = b.addExecutable(.{
+        .name = "stanza-keycodes",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/keycodes.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    keycodes.root_module.addImport("stanza", stanza);
+    b.installArtifact(keycodes);
+    const run_keycodes = b.addRunArtifact(keycodes);
+    const keycodes_step = b.step("keycodes", "Show the raw bytes each key sends");
+    keycodes_step.dependOn(&run_keycodes.step);
+
     const fmt = b.addSystemCommand(&.{ "zig", "fmt", "--check", "." });
     const qa_step = b.step("qa", "Check formatting");
     qa_step.dependOn(&fmt.step);

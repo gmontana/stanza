@@ -200,6 +200,18 @@ pub const Editor = struct {
         self.hidden = false;
         self.resetPaste();
         self.clearSearch();
+        self.restoreTerminal();
+    }
+
+    /// Hand the terminal back without touching editor state or the
+    /// allocator, so a panic handler can leave the user's shell usable:
+    ///
+    ///     pub const panic = std.debug.FullPanic(myPanic);
+    ///     fn myPanic(msg: []const u8, ra: ?usize) noreturn {
+    ///         editor.restoreTerminal();
+    ///         std.debug.defaultPanic(msg, ra);
+    ///     }
+    pub fn restoreTerminal(self: *Editor) void {
         if (self.cfg.editing == .vi) self.term.cursorReset();
         self.term.pasteOff();
         self.term.disableRaw();
