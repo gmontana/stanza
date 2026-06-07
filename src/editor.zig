@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const completion = @import("completion.zig");
 const config = @import("config.zig");
 const key = @import("key.zig");
 const sys = @import("sys.zig");
@@ -44,7 +45,8 @@ pub const Editor = struct {
     paste_match: usize = 0,
     paste_buf: std.ArrayList(u8) = .empty,
     search_state: ?SearchState = null,
-    cycle: ?CycleState = null,
+    cycle: ?completion.CycleState = null,
+    menu: ?completion.MenuState = null,
     active: bool = false,
     hidden: bool = false,
 
@@ -55,14 +57,6 @@ pub const Editor = struct {
         q: std.ArrayList(u8) = .empty,
         idx: ?usize = null,
     };
-    /// Candidates live in the completion arena, which stays untouched while
-    /// a cycle is in progress.
-    const CycleState = struct {
-        items: []const []const u8,
-        shown_len: usize,
-        idx: usize,
-    };
-
     pub const Step = union(enum) { line: []u8, more };
 
     pub fn init(alloc: std.mem.Allocator, cfg: config.Config) Editor {
@@ -141,7 +135,7 @@ pub const Editor = struct {
         vi.reset(self);
         self.resetPaste();
         self.clearSearch();
-        self.cycle = null;
+        self.clearComps();
         self.ml_row = 0;
         self.active = true;
         self.hidden = false;
@@ -200,6 +194,7 @@ pub const Editor = struct {
         self.hidden = false;
         self.resetPaste();
         self.clearSearch();
+        self.clearComps();
         self.restoreTerminal();
     }
 
@@ -270,7 +265,7 @@ pub const Editor = struct {
     }
 
     fn apply(self: *Editor, k: key.Key) !Action {
-        self.endCycleFor(k);
+        if (try self.completionKey(k)) return .cont;
         if (try self.interceptKey(k)) return .cont;
         if (self.cfg.editing == .vi and self.vi_normal) return self.viNormalKey(k);
         switch (k) {
@@ -280,7 +275,6 @@ pub const Editor = struct {
             .cancel => return .cancel,
             .eof => return .eof,
             .ctrl_d => if (self.line.isEmpty()) return .eof else self.line.deleteFwd(),
-            .tab => try self.complete(),
             .backspace => self.line.backspace(),
             .del_fwd => self.line.deleteFwd(),
             .left => self.line.left(),
@@ -300,10 +294,27 @@ pub const Editor = struct {
             .down => try self.histNext(),
             .search_back, .paste_begin, .suspend_proc => unreachable,
             .escape => if (self.cfg.editing == .vi) vi.enterNormal(self),
-            .backtab => if (self.cfg.complete_style == .cycle) try self.cycleStep(.back),
+            .tab, .backtab => unreachable,
             .ignore => {},
         }
         return .cont;
+    }
+
+    fn completionKey(self: *Editor, k: key.Key) !bool {
+        var comp = self.comps();
+        switch (try completion.menuKey(&comp, k)) {
+            .handled => return true,
+            .pass => {},
+        }
+        completion.endCycleFor(&comp, k);
+        // Tab is inert in vi normal mode, as it was before completion styles.
+        if (self.cfg.editing == .vi and self.vi_normal) return false;
+        switch (k) {
+            .tab => try completion.complete(&comp),
+            .backtab => try completion.back(&comp),
+            else => return false,
+        }
+        return true;
     }
 
     /// Ctrl-Z: hand the terminal back, stop like a cooked-mode program
@@ -319,15 +330,6 @@ pub const Editor = struct {
         self.term.updateSize(); // the window may have changed while stopped
         self.ml_row = 0;
         try self.redraw();
-    }
-
-    /// Search/paste rewrite the line under a completion cycle, so every key
-    /// but Tab/Shift-Tab — intercepted ones included — must end it.
-    fn endCycleFor(self: *Editor, k: key.Key) void {
-        switch (k) {
-            .tab, .backtab => {},
-            else => self.cycle = null,
-        }
     }
 
     /// vi normal mode: history navigation stays an editor concern; everything
@@ -369,9 +371,33 @@ pub const Editor = struct {
         if (self.cfg.multiline) {
             try render.buildMulti(args, &self.ml_row);
         } else {
+            // Menu rows go out first (they end back on the prompt's row via
+            // relative moves); the prompt repaint then re-anchors the cursor.
+            var comp = self.comps();
+            try completion.writeMenu(&comp);
             try render.build(args);
         }
         try self.term.write(self.out_buf.items);
+    }
+
+    fn comps(self: *Editor) completion.Engine {
+        return .{
+            .alloc = self.alloc,
+            .cfg = self.cfg,
+            .term = &self.term,
+            .line = &self.line,
+            .arena = &self.arena,
+            .out = &self.out_buf,
+            .ml_row = &self.ml_row,
+            .cycle = &self.cycle,
+            .menu = &self.menu,
+            .hidden = self.hidden,
+        };
+    }
+
+    fn clearComps(self: *Editor) void {
+        self.cycle = null;
+        self.menu = null;
     }
 
     fn finish(self: *Editor) ![]u8 {
@@ -420,93 +446,6 @@ pub const Editor = struct {
     fn clearStash(self: *Editor) void {
         if (self.stash) |s| self.alloc.free(s);
         self.stash = null;
-    }
-
-    // --- completion ---
-
-    fn complete(self: *Editor) !void {
-        switch (self.cfg.complete_style) {
-            .list => try self.completeList(),
-            .cycle => try self.cycleStep(.fwd),
-        }
-    }
-
-    fn completeList(self: *Editor) !void {
-        const items = (try self.gatherComps()) orelse return;
-        const word = self.currentWord();
-        if (items.len == 1) return self.line.replaceBack(word.len, items[0]);
-        const lcp = longestPrefix(items);
-        if (lcp.len > word.len) return self.line.replaceBack(word.len, lcp);
-        try self.listComps(items);
-    }
-
-    /// Run the completion callback into a freshly reset arena. Null means
-    /// "nothing to do" (no callback or no candidates; the bell already rang).
-    fn gatherComps(self: *Editor) !?[]const []const u8 {
-        const cb = self.cfg.complete orelse {
-            self.term.bell();
-            return null;
-        };
-        _ = self.arena.reset(.retain_capacity);
-        var comps = config.Completions{ .arena = self.arena.allocator() };
-        try cb(self.cfg.ctx, self.currentWord(), &comps);
-        if (comps.items.items.len == 0) {
-            self.term.bell();
-            return null;
-        }
-        return comps.items.items;
-    }
-
-    fn cycleStep(self: *Editor, dir: enum { fwd, back }) !void {
-        if (self.cycle == null) return self.cycleBegin();
-        const c = &self.cycle.?;
-        if (c.shown_len > self.line.cursor) {
-            // The line changed under the cycle (defense in depth; intercepted
-            // keys already clear it): restart rather than slice out of range.
-            self.cycle = null;
-            return self.cycleBegin();
-        }
-        const n = c.items.len;
-        const next = switch (dir) {
-            .fwd => (c.idx + 1) % n,
-            .back => (c.idx + n - 1) % n,
-        };
-        try self.line.replaceBack(c.shown_len, c.items[next]);
-        c.idx = next;
-        c.shown_len = c.items[next].len;
-    }
-
-    fn cycleBegin(self: *Editor) !void {
-        const items = (try self.gatherComps()) orelse return;
-        const word = self.currentWord();
-        try self.line.replaceBack(word.len, items[0]);
-        if (items.len == 1) return; // nothing to cycle through
-        self.cycle = .{ .items = items, .shown_len = items[0].len, .idx = 0 };
-    }
-
-    fn currentWord(self: *Editor) []const u8 {
-        const head = self.line.text()[0..self.line.cursor];
-        const s = if (std.mem.lastIndexOfAny(u8, head, " \t")) |i| i + 1 else 0;
-        return head[s..];
-    }
-
-    fn listComps(self: *Editor, items: []const []const u8) !void {
-        if (self.hidden) return;
-        try self.term.write("\r\n");
-        const shown = @min(items.len, self.cfg.max_listed);
-        for (items[0..shown]) |c| {
-            try self.term.write(c);
-            try self.term.write("   ");
-        }
-        if (shown < items.len) {
-            self.out_buf.clearRetainingCapacity();
-            try render.appendNum(&self.out_buf, self.alloc, "… (", items.len - shown, " more)");
-            try self.term.write(self.out_buf.items);
-        }
-        try self.term.write("\r\n");
-        // The cursor now sits on a fresh row below the listing; that row is the
-        // top of the next redraw, so a stale ml_row must not pull it back up.
-        self.ml_row = 0;
     }
 
     // --- bracketed paste ---
@@ -681,22 +620,6 @@ pub const Editor = struct {
     }
 };
 
-fn longestPrefix(items: []const []const u8) []const u8 {
-    var p = items[0];
-    for (items[1..]) |s| {
-        var i: usize = 0;
-        while (i < p.len and i < s.len and p[i] == s[i]) i += 1;
-        p = p[0..utf8Boundary(p, i)];
-    }
-    return p;
-}
-
-fn utf8Boundary(s: []const u8, n: usize) usize {
-    var end = n;
-    while (end > 0 and end < s.len and unicode.isCont(s[end])) end -= 1;
-    return end;
-}
-
 fn appendPaste(out: *std.ArrayList(u8), alloc: std.mem.Allocator, b: u8) !void {
     if (b == '\r' or b == '\n') {
         try out.append(alloc, ' ');
@@ -716,17 +639,6 @@ fn popCp(q: *std.ArrayList(u8)) void {
     var j = q.items.len - 1;
     while (j > 0 and unicode.isCont(q.items[j])) j -= 1;
     q.items.len = j;
-}
-
-test "longest common prefix" {
-    const items = [_][]const u8{ "commit", "config", "checkout" };
-    try std.testing.expectEqualStrings("c", longestPrefix(&items));
-    const two = [_][]const u8{ "config", "configure" };
-    try std.testing.expectEqualStrings("config", longestPrefix(&two));
-    const same_codepoint = [_][]const u8{ "éclair", "éon" };
-    try std.testing.expectEqualStrings("é", longestPrefix(&same_codepoint));
-    const split_codepoint = [_][]const u8{ "éclair", "êwork" };
-    try std.testing.expectEqualStrings("", longestPrefix(&split_codepoint));
 }
 
 fn openWrite(path: []const u8) !sys.Fd {
@@ -926,10 +838,64 @@ test "non-tty input falls back to a plain line read" {
     try std.testing.expectError(error.Eof, ed.prompt("> "));
 }
 
-fn twoCompletions(_: ?*anyopaque, word: []const u8, out: *config.Completions) anyerror!void {
+fn twoCompletions(
+    _: ?*anyopaque,
+    _: []const u8,
+    _: usize,
+    word: []const u8,
+    out: *config.Completions,
+) anyerror!void {
     _ = word;
     try out.add("commit");
     try out.add("commute");
+}
+
+test "vi normal mode keeps Tab inert" {
+    const dn = try sys.devNull();
+    defer sys.close(dn);
+    const cfg = config.Config{
+        .editing = .vi,
+        .complete = twoCompletions,
+        .complete_style = .cycle,
+    };
+    var ed = Editor.initFd(std.testing.allocator, cfg, dn, dn);
+    defer ed.deinit();
+    try typeText(&ed, "com");
+    _ = try ed.apply(.escape); // normal mode
+    _ = try ed.apply(.tab);
+    try std.testing.expectEqualStrings("com", ed.line.text()); // unchanged
+    try std.testing.expect(ed.cycle == null and ed.menu == null);
+}
+
+test "menu rows are written before the prompt repaint" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [128]u8 = undefined;
+    const path = try tmpPath(&path_buf, &tmp, "menu");
+    const out = try openWrite(path);
+    const cfg = config.Config{ .complete = twoCompletions, .complete_style = .menu };
+    var ed = Editor.initFd(std.testing.allocator, cfg, sys.invalid, out);
+    defer ed.deinit();
+    ed.active = true;
+    ed.prompt_text = "> ";
+    try ed.line.setText("com");
+    ed.src.buf[0] = 0x09; // Tab
+    ed.src.len = 1;
+    switch (try ed.editFeed()) {
+        .more => {},
+        else => return error.TestUnexpectedResult,
+    }
+    sys.close(out);
+    var got: std.ArrayList(u8) = .empty;
+    defer got.deinit(std.testing.allocator);
+    try readBack(std.testing.allocator, path, &got);
+    // The selected-row marker must precede the prompt repaint, and the menu
+    // must return to the prompt row with a relative move, never DECSC/DECRC.
+    const menu_at = try indexIn(got.items, "\x1b[7m");
+    const prompt_at = try indexIn(got.items, "> commit");
+    try std.testing.expect(menu_at < prompt_at);
+    try std.testing.expect(std.mem.indexOf(u8, got.items, "\x1b[s") == null);
+    try std.testing.expect(std.mem.indexOf(u8, got.items, "\x1b[2A") != null); // 2 rows
 }
 
 test "cycle completion walks candidates both ways and wraps" {
@@ -1003,7 +969,13 @@ test "completion inserts the longest common prefix" {
     try std.testing.expectEqualStrings("comm", ed.line.text()); // common prefix of commit/commute
 }
 
-fn forkCompletions(_: ?*anyopaque, word: []const u8, out: *config.Completions) anyerror!void {
+fn forkCompletions(
+    _: ?*anyopaque,
+    _: []const u8,
+    _: usize,
+    word: []const u8,
+    out: *config.Completions,
+) anyerror!void {
     _ = word;
     try out.add("commit");
     try out.add("config"); // share only "co" with the word -> no prefix to add -> list

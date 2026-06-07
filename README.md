@@ -31,9 +31,8 @@ editing, reverse history search, and multi-line wrapping. Recorded with
 - **History** — de-duplicated, size-bounded, persists to a file (truncate or
   append-merge for concurrent instances), navigable with Up/Down and
   searchable with **Ctrl-R** (reverse incremental search).
-- **Completion** — a `Tab` callback; Stanza inserts the longest common prefix
-  and lists candidates (capped by `.max_listed`), or set
-  `.complete_style = .cycle` to walk candidates with Tab/Shift-Tab.
+- **Completion** — a line-aware `Tab` callback. Stanza can list candidates,
+  cycle through them, or keep a small selectable menu below the prompt.
 - **Hints** — dim ghost text after the cursor (e.g. suggest the rest of a word).
 - **Syntax highlighting** — a paint callback styles the line as you type.
 - **UTF-8 + display widths** — cursor motion, deletion, and rendering are
@@ -128,7 +127,19 @@ use function pointers plus an opaque `ctx`, which keeps `Editor` as one concrete
 runtime-configurable type.
 
 ```zig
-fn complete(_: ?*anyopaque, word: []const u8, out: *stanza.Completions) anyerror!void {
+fn complete(
+    _: ?*anyopaque,
+    line: []const u8,
+    cursor: usize,
+    word: []const u8,
+    out: *stanza.Completions,
+) anyerror!void {
+    if (std.mem.eql(u8, line[0 .. cursor - word.len], "size ")) {
+        for (&.{ "256x256", "512x512", "1024x1024" }) |s| {
+            if (std.mem.startsWith(u8, s, word)) try out.add(s);
+        }
+        return;
+    }
     for (subcommands) |c| if (std.mem.startsWith(u8, c, word)) try out.add(c);
 }
 
@@ -142,6 +153,7 @@ fn paint(_: ?*anyopaque, line: []const u8, out: *stanza.Painter) anyerror!void {
 
 var ed = stanza.Editor.init(alloc, .{
     .complete = complete,
+    .complete_style = .menu,
     .hint = hint,
     .paint = paint,
     // .editing = .emacs,    // modeless readline keys (default is .vi)
@@ -157,6 +169,18 @@ only zero-width SGR escapes; it applies when the whole line fits on screen.
 Text returned by callbacks — completion candidates, hints, and painted spans —
 is trusted application output and should be valid UTF-8. Stanza copies or emits
 it as provided.
+
+Completion styles:
+
+- `.list` inserts the longest common prefix; if none grows, candidates are
+  printed below the prompt.
+- `.cycle` replaces the current word with each candidate in order; Shift-Tab
+  walks backward.
+- `.menu` keeps candidates visible below the prompt (at most 8 rows; the
+  window follows the selection). Tab/Down moves forward, Shift-Tab/Up moves
+  backward, Enter/Right accepts, and Esc/Ctrl-G cancels. Typing closes the
+  menu and keeps the original word, so another Tab reopens it with the
+  filtered prefix. In multiline mode it falls back to cycling.
 
 ## Event Loop API
 

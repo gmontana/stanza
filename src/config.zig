@@ -78,10 +78,12 @@ pub const Painter = struct {
     }
 };
 
-/// Called on Tab with the word under the cursor (text back to the last space).
-/// Add full-word replacements to `out`.
+/// Called on Tab with the full line, byte cursor, and current word. Add
+/// full-word replacements to `out`.
 pub const CompleteFn = *const fn (
     ctx: ?*anyopaque,
+    line: []const u8,
+    cursor: usize,
     word: []const u8,
     out: *Completions,
 ) anyerror!void;
@@ -96,11 +98,10 @@ pub const PaintFn = *const fn (ctx: ?*anyopaque, line: []const u8, out: *Painter
 /// modal normal/insert split (starting in insert).
 pub const Editing = enum { emacs, vi };
 
-/// What Tab does with several completion candidates: `.list` inserts the
-/// longest common prefix and prints the candidates (readline-style);
-/// `.cycle` replaces the word with each candidate in turn, Shift-Tab going
-/// backward (linenoise-style).
-pub const CompleteStyle = enum { list, cycle };
+/// What Tab does with several completion candidates: `.list` prints them,
+/// `.cycle` walks them inline, and `.menu` keeps a small selector visible
+/// below the prompt.
+pub const CompleteStyle = enum { list, cycle, menu };
 
 /// Behavior of an `Editor`. All fields are optional; the zero value is a plain
 /// editor with history but no completion, hints, or highlighting.

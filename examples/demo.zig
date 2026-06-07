@@ -57,7 +57,13 @@ pub fn main() !void {
     try ed.term.write("bye.\n");
 }
 
-fn complete(_: ?*anyopaque, word: []const u8, out: *stanza.Completions) anyerror!void {
+fn complete(
+    _: ?*anyopaque,
+    _: []const u8,
+    _: usize,
+    word: []const u8,
+    out: *stanza.Completions,
+) anyerror!void {
     for (commands) |c| {
         if (std.mem.startsWith(u8, c, word)) try out.add(c);
     }

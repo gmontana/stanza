@@ -36,6 +36,7 @@ pub const Hint = config.Hint;
 pub const Completions = config.Completions;
 pub const Painter = config.Painter;
 pub const CompleteFn = config.CompleteFn;
+pub const CompleteStyle = config.CompleteStyle;
 pub const HintFn = config.HintFn;
 pub const PaintFn = config.PaintFn;
 
