@@ -357,6 +357,8 @@ pub const Editor = struct {
 
     fn redraw(self: *Editor) !void {
         if (self.hidden) return;
+        var draw_cfg = self.cfg;
+        if (self.menu != null) draw_cfg.hint = null;
         const args = render.DrawArgs{
             .cols = self.term.cols,
             .alloc = self.alloc,
@@ -366,7 +368,7 @@ pub const Editor = struct {
             .prompt = self.prompt_text,
             .text = self.line.text(),
             .cursor = self.line.cursor,
-            .cfg = self.cfg,
+            .cfg = draw_cfg,
         };
         if (self.cfg.multiline) {
             try render.buildMulti(args, &self.ml_row);

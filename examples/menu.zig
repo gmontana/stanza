@@ -76,16 +76,14 @@ fn hint(_: ?*anyopaque, line: []const u8) ?stanza.Hint {
     if (std.mem.eql(u8, line, "stats ")) return .{ .text = "on" };
     if (std.mem.eql(u8, line, "live ")) return .{ .text = "every" };
     if (std.mem.eql(u8, line, "live every ")) return .{ .text = "1" };
-    if (done(line)) return .{ .text = "  (Enter to submit)" };
+    // The command already has its value: nothing left to complete here, so
+    // say what the next step is instead of leaving Tab to ring a mute bell.
+    for ([_][]const u8{ "size ", "stats ", "live every ", "live " }) |cmd| {
+        if (std.mem.startsWith(u8, line, cmd) and line.len > cmd.len) {
+            return .{ .text = "  — Enter submits" };
+        }
+    }
     return null;
-}
-
-fn done(line: []const u8) bool {
-    return std.mem.startsWith(u8, line, "size ") or
-        std.mem.startsWith(u8, line, "stats ") or
-        std.mem.eql(u8, line, "live on") or
-        std.mem.eql(u8, line, "live off") or
-        std.mem.startsWith(u8, line, "live every ");
 }
 
 fn paint(_: ?*anyopaque, line: []const u8, out: *stanza.Painter) anyerror!void {
