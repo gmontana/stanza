@@ -239,6 +239,7 @@ observes a resize.
 
 ```sh
 zig build demo          # interactive showcase: completion, hints, highlight
+zig build menu          # the completion-menu example (chain commands on a line)
 zig build async         # the event-loop example (ticks print above the prompt)
 zig build wrap          # the multi-line wrapping example (try a narrow window)
 zig build keycodes      # show the raw bytes each key sends (for bug reports)
