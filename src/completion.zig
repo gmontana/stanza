@@ -288,6 +288,23 @@ fn valueComps(
     for (values) |v| if (std.mem.startsWith(u8, v, word)) try out.add(v);
 }
 
+fn chainComps(
+    _: ?*anyopaque,
+    line: []const u8,
+    cursor: usize,
+    word: []const u8,
+    out: *config.Completions,
+) anyerror!void {
+    const head = line[0 .. cursor - word.len];
+    const values = if (std.mem.eql(u8, head, "live "))
+        &[_][]const u8{ "on", "off", "every " }
+    else if (std.mem.eql(u8, head, "live every "))
+        &[_][]const u8{ "1", "2", "4" }
+    else
+        &[_][]const u8{};
+    for (values) |v| if (std.mem.startsWith(u8, v, word)) try out.add(v);
+}
+
 const Harness = struct {
     line: Line,
     arena: std.heap.ArenaAllocator,
@@ -299,6 +316,7 @@ const Harness = struct {
     cycle: ?CycleState = null,
     menu: ?MenuState = null,
     style: config.CompleteStyle,
+    complete_cb: config.CompleteFn = valueComps,
 
     fn init(style: config.CompleteStyle) !Harness {
         const in_fd = try sys.devNull();
@@ -325,7 +343,7 @@ const Harness = struct {
     fn engine(self: *Harness) Engine {
         return .{
             .alloc = std.testing.allocator,
-            .cfg = .{ .complete = valueComps, .complete_style = self.style },
+            .cfg = .{ .complete = self.complete_cb, .complete_style = self.style },
             .term = &self.term,
             .line = &self.line,
             .arena = &self.arena,
@@ -384,6 +402,21 @@ test "menu completion cycles, accepts, and cancels" {
     try complete(&e);
     try std.testing.expect(try menuKey(&e, .escape) == .handled);
     try std.testing.expectEqualStrings("size ", h.line.text());
+}
+
+test "menu can complete consecutive words on one line" {
+    var h = try Harness.init(.menu);
+    defer h.deinit();
+    h.complete_cb = chainComps;
+    try h.line.setText("live ");
+    var e = h.engine();
+    try complete(&e);
+    try std.testing.expect(try menuKey(&e, .tab) == .handled);
+    try std.testing.expect(try menuKey(&e, .tab) == .handled);
+    try std.testing.expectEqualStrings("live every ", h.line.text());
+    try std.testing.expect(try menuKey(&e, .submit) == .handled);
+    try complete(&e);
+    try std.testing.expectEqualStrings("live every 1", h.line.text());
 }
 
 test "typing closes menu and keeps the original word" {

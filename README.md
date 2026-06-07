@@ -15,8 +15,8 @@ full grapheme-cluster editing.
 
 ![Stanza in action](assets/demo.gif)
 
-*The demo shows completion, ghost-text hints, command highlighting, vi-mode
-editing, reverse history search, and multi-line wrapping. Recorded with
+*The demo shows the completion menu, line-aware argument completion, command
+highlighting, and multi-line wrapping. Recorded with
 [`assets/demo.tape`](assets/demo.tape).*
 
 ## What It Includes

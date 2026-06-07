@@ -1,6 +1,6 @@
 # VHS tape for the Stanza demo GIF. Regenerate with: vhs assets/demo.tape
-# (requires `vhs` and a built ./zig-out/bin/stanza-demo and ./zig-out/bin/stanza-wrap)
-# One recording: the single-line demo, then the multi-line example.
+# (requires `vhs` and built ./zig-out/bin/stanza-menu and ./zig-out/bin/stanza-wrap)
+# One recording: menu completion, then the multi-line example.
 
 Output assets/demo.gif
 
@@ -13,48 +13,41 @@ Set Theme "Catppuccin Mocha"
 Set WindowBar Colorful
 Set TypingSpeed 65ms
 
-# --- single-line: completion, hints, highlight, vi, history search ---
+# --- single-line: menu completion and line-aware argument completion ---
 Hide
-Type "cd ." Enter
-Type "rm -f .stanza_demo_history; clear" Enter
-Type "./zig-out/bin/stanza-demo" Enter
+Type "clear" Enter
+Type "./zig-out/bin/stanza-menu" Enter
 Sleep 1s
 Show
 
 Sleep 800ms
-Type "comm"
-Sleep 1s
+Type "li"
+Sleep 600ms
 Tab
-Sleep 800ms
-Type " -m hello"
+Sleep 600ms
+Tab
+Sleep 600ms
+Tab
 Sleep 600ms
 Enter
-Sleep 800ms
-
-Type "stat"
-Sleep 900ms
+Sleep 500ms
 Tab
 Sleep 700ms
 Enter
-Sleep 800ms
-
-# vi mode: fix a typo in normal mode (the cursor turns into a block)
-Type "pushh"
-Sleep 700ms
-Escape
-Sleep 800ms
-Type "x"
-Sleep 800ms
+Sleep 500ms
 Enter
 Sleep 900ms
 
-# reverse incremental history search
-Ctrl+R
-Sleep 700ms
-Type "comm"
-Sleep 1s
+Type "size "
+Sleep 600ms
+Tab
+Sleep 600ms
+Tab
+Sleep 600ms
 Enter
-Sleep 900ms
+Sleep 500ms
+Enter
+Sleep 800ms
 
 Ctrl+D
 Sleep 1s
