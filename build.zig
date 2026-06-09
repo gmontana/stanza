@@ -1,8 +1,9 @@
 //! Build graph for Stanza: the importable `stanza` module, per-file unit tests,
-//! the interactive demo, and a `qa` step that checks formatting.
+//! the interactive examples, and a `qa` step that checks formatting.
 //!
 //! Entry points: `zig build` (install demos), `zig build test`,
-//! `zig build test-portable`, `zig build demo`, `zig build qa`.
+//! `zig build test-portable`, `zig build demo`, `zig build async`,
+//! `zig build menu`, `zig build wrap`, `zig build keycodes`, `zig build qa`.
 
 const std = @import("std");
 

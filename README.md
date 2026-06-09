@@ -6,7 +6,7 @@ highlighting, and vi or Emacs-style editing, without linking libc or a C
 readline library.
 
 The editor is allocator-explicit and instance-based. It talks to terminals
-directly, uses raw mode and bracketed paste, detects terminal width, and falls
+directly, uses raw mode and bracketed paste, detects terminal size, and falls
 back to a plain line read when input or output is not a terminal.
 
 The current scope is macOS, Linux, BSD, and Windows console hosts with virtual
@@ -58,7 +58,7 @@ wrapped multi-line editing. Recorded with
   `fg` the editor re-enters raw mode and repaints the line as it was.
 - **Panic-safe restore** — `restoreTerminal()` is allocator-free and callable
   from a panic handler, so a crashing host never leaves the shell raw.
-- **Bounded terminal probes** — POSIX width probing uses a timeout.
+- **Bounded terminal probes** — POSIX size probing uses timeouts.
 
 ## Quick start
 
@@ -303,7 +303,7 @@ exe.root_module.addImport("stanza", stanza.module("stanza"));
   POSIX uses file descriptors and `tcgetattr`; Windows uses console handles and
   virtual-terminal mode.
 - **Small modules.** The source is split into `sys`, `unicode`, `config`,
-  `key`, `line`, `history`, `term`, `render`, `editor`, and `root`.
+  `key`, `line`, `history`, `completion`, `vi`, `render`, `editor`, and `root`.
 - **Backend boundary.** Platform-specific terminal and file-handle code lives
   behind `src/backend.zig`.
 - **Runtime-configurable callbacks.** Completion, hints, and highlighting use

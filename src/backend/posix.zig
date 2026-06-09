@@ -100,15 +100,22 @@ pub const Terminal = struct {
     fn queryCorner(self: *Terminal) !Pos {
         const start = try self.cursorPos();
         try self.write("\x1b[999;999H");
-        const corner = try self.cursorPos();
-        var back: [24]u8 = undefined;
-        try self.write(try std.fmt.bufPrint(&back, "\x1b[{d};{d}H", .{ start.row, start.col }));
+        const corner = self.cursorPos() catch |err| {
+            try self.moveTo(start);
+            return err;
+        };
+        try self.moveTo(start);
         return corner;
     }
 
     fn cursorPos(self: *Terminal) !Pos {
         try self.write("\x1b[6n");
         return readPos(self.in);
+    }
+
+    fn moveTo(self: *Terminal, pos: Pos) !void {
+        var buf: [64]u8 = undefined;
+        try self.write(try std.fmt.bufPrint(&buf, "\x1b[{d};{d}H", .{ pos.row, pos.col }));
     }
 };
 
@@ -219,17 +226,21 @@ fn parsePos(reply: []const u8) !Pos {
     const semi = std.mem.lastIndexOfScalar(u8, reply, ';') orelse return error.BadReply;
     const bracket = std.mem.lastIndexOfScalar(u8, reply[0..semi], '[') orelse return error.BadReply;
     return .{
-        .row = parseNum(reply[bracket + 1 .. semi]),
-        .col = parseNum(reply[semi + 1 ..]),
+        .row = try parseNum(reply[bracket + 1 .. semi]),
+        .col = try parseNum(reply[semi + 1 ..]),
     };
 }
 
-fn parseNum(s: []const u8) usize {
+fn parseNum(s: []const u8) !usize {
     var v: usize = 0;
+    var digits = false;
     for (s) |c| {
         if (c < '0' or c > '9') break;
-        v = v * 10 + (c - '0');
+        digits = true;
+        v = std.math.mul(usize, v, 10) catch return error.BadReply;
+        v = std.math.add(usize, v, c - '0') catch return error.BadReply;
     }
+    if (!digits) return error.BadReply;
     return v;
 }
 
@@ -265,4 +276,6 @@ test "parsePos reads row and column from a DSR reply" {
     try std.testing.expectEqual(@as(usize, 3), q.row);
     try std.testing.expectError(error.BadReply, parsePos("12;80")); // no CSI
     try std.testing.expectError(error.BadReply, parsePos("\x1b[5"));
+    try std.testing.expectError(error.BadReply, parsePos("\x1b[;80"));
+    try std.testing.expectError(error.BadReply, parsePos("\x1b[999999999999999999999999999999;80"));
 }

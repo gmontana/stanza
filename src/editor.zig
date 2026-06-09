@@ -123,7 +123,7 @@ pub const Editor = struct {
         try self.term.enableRaw();
         errdefer self.editStop(); // never leave the tty raw on a failed start
         self.term.pasteOn();
-        // Query width once; later changes arrive via notifyResize or the
+        // Query size once; later changes arrive via notifyResize or the
         // optional SIGWINCH handler.
         // Re-querying every line would read (and eat) any typed-ahead bytes.
         if (!self.sized) {
