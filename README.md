@@ -179,7 +179,10 @@ Completion styles:
 - `.cycle` replaces the current word with each candidate in order; Shift-Tab
   walks backward.
 - `.menu` keeps candidates visible below the prompt (at most 8 rows; the
-  window follows the selection). Tab/Down moves forward, Shift-Tab/Up moves
+  window follows the selection). Candidates added with
+  `out.addDetail("512x512", "balanced")` show the detail dimmed beside the
+  insert text; only the insert text reaches the line. Tab/Down moves forward,
+  Shift-Tab/Up moves
   backward, Enter/Right accepts, and Esc/Ctrl-G cancels. Typing closes the
   menu and keeps the original word, so another Tab reopens it with the
   filtered prefix. In multiline mode it falls back to cycling.

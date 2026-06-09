@@ -34,6 +34,7 @@ pub const Color = config.Color;
 pub const Style = config.Style;
 pub const Hint = config.Hint;
 pub const Completions = config.Completions;
+pub const Candidate = config.Candidate;
 pub const Painter = config.Painter;
 pub const CompleteFn = config.CompleteFn;
 pub const CompleteStyle = config.CompleteStyle;

@@ -60,7 +60,16 @@ fn complete(
         return addMatching(word, out, &.{ "1", "2", "4" });
     }
     if (std.mem.endsWith(u8, head, "size ")) {
-        return addMatching(word, out, &.{ "256x256", "512x512", "1024x1024" });
+        // Details show dimmed in the menu; only the insert text reaches the line.
+        const sizes = [_]stanza.Candidate{
+            .{ .insert = "256x256", .detail = "fast" },
+            .{ .insert = "512x512", .detail = "balanced" },
+            .{ .insert = "1024x1024", .detail = "detailed" },
+        };
+        for (sizes) |c| {
+            if (std.mem.startsWith(u8, c.insert, word)) try out.addDetail(c.insert, c.detail);
+        }
+        return;
     }
     if (std.mem.endsWith(u8, head, "stats ")) return addMatching(word, out, &.{ "on", "off" });
     if (std.mem.endsWith(u8, head, "live ")) return addMatching(word, out, &.{ "on", "off", "every " });

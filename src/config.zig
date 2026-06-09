@@ -35,16 +35,33 @@ pub const Hint = struct {
     style: Style = .{ .color = .gray },
 };
 
+/// One completion candidate: the text inserted into the line, plus an
+/// optional annotation a completion menu shows dimmed next to it. Only
+/// `insert` ever reaches the line.
+pub const Candidate = struct {
+    insert: []const u8,
+    detail: []const u8 = "",
+};
+
 /// Collects completion candidates. Backed by an arena the editor owns and
 /// resets between requests, so callbacks never worry about freeing.
 pub const Completions = struct {
-    items: std.ArrayList([]const u8) = .empty,
+    items: std.ArrayList(Candidate) = .empty,
     arena: std.mem.Allocator,
 
     /// Add one candidate; the text is copied into the arena as provided.
     /// Candidate text is trusted application output and should be valid UTF-8.
     pub fn add(self: *Completions, text: []const u8) !void {
-        try self.items.append(self.arena, try self.arena.dupe(u8, text));
+        try self.addDetail(text, "");
+    }
+
+    /// Add a candidate with an annotation for menu display (e.g. insert
+    /// "512x512", detail "balanced"). Both are copied into the arena.
+    pub fn addDetail(self: *Completions, insert: []const u8, detail: []const u8) !void {
+        try self.items.append(self.arena, .{
+            .insert = try self.arena.dupe(u8, insert),
+            .detail = try self.arena.dupe(u8, detail),
+        });
     }
 };
 
@@ -137,7 +154,10 @@ test "completion candidates are copied as trusted bytes" {
     var comps = Completions{ .arena = arena.allocator() };
 
     try comps.add("ok\xff");
+    try comps.addDetail("512x512", "balanced");
 
-    try std.testing.expectEqual(@as(usize, 1), comps.items.items.len);
-    try std.testing.expectEqualStrings("ok\xff", comps.items.items[0]);
+    try std.testing.expectEqual(@as(usize, 2), comps.items.items.len);
+    try std.testing.expectEqualStrings("ok\xff", comps.items.items[0].insert);
+    try std.testing.expectEqualStrings("", comps.items.items[0].detail);
+    try std.testing.expectEqualStrings("balanced", comps.items.items[1].detail);
 }

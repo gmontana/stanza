@@ -10,13 +10,13 @@ const unicode = @import("unicode.zig");
 const Line = @import("line.zig").Line;
 
 pub const CycleState = struct {
-    items: []const []const u8,
+    items: []const config.Candidate,
     shown_len: usize,
     idx: usize,
 };
 
 pub const MenuState = struct {
-    items: []const []const u8,
+    items: []const config.Candidate,
     saved: []const u8,
     shown_len: usize,
     idx: usize,
@@ -112,13 +112,13 @@ pub fn writeMenu(e: *Engine) !void {
 fn completeList(e: *Engine) !void {
     const items = (try gather(e)) orelse return;
     const word = currentWord(e.line);
-    if (items.len == 1) return e.line.replaceBack(word.len, items[0]);
+    if (items.len == 1) return e.line.replaceBack(word.len, items[0].insert);
     const lcp = longestPrefix(items);
     if (lcp.len > word.len) return e.line.replaceBack(word.len, lcp);
     try listComps(e, items);
 }
 
-fn gather(e: *Engine) !?[]const []const u8 {
+fn gather(e: *Engine) !?[]const config.Candidate {
     const cb = e.cfg.complete orelse {
         e.term.bell();
         return null;
@@ -142,19 +142,19 @@ fn cycleStep(e: *Engine, dir: Dir) !void {
         return cycleBegin(e, dir);
     }
     const next = nextIdx(c.idx, c.items.len, dir);
-    try e.line.replaceBack(c.shown_len, c.items[next]);
+    try e.line.replaceBack(c.shown_len, c.items[next].insert);
     c.idx = next;
-    c.shown_len = c.items[next].len;
+    c.shown_len = c.items[next].insert.len;
 }
 
 fn cycleBegin(e: *Engine, dir: Dir) !void {
     const items = (try gather(e)) orelse return;
     const word = currentWord(e.line);
     const idx = if (dir == .back and items.len > 1) items.len - 1 else 0;
-    try e.line.replaceBack(word.len, items[idx]);
+    try e.line.replaceBack(word.len, items[idx].insert);
     if (items.len == 1) return;
     e.menu.* = null;
-    e.cycle.* = .{ .items = items, .shown_len = items[idx].len, .idx = idx };
+    e.cycle.* = .{ .items = items, .shown_len = items[idx].insert.len, .idx = idx };
 }
 
 fn menuBegin(e: *Engine, dir: Dir) !void {
@@ -162,19 +162,19 @@ fn menuBegin(e: *Engine, dir: Dir) !void {
     const word = currentWord(e.line);
     const saved = try e.arena.allocator().dupe(u8, word);
     const idx = if (dir == .back and items.len > 1) items.len - 1 else 0;
-    try e.line.replaceBack(word.len, items[idx]);
+    try e.line.replaceBack(word.len, items[idx].insert);
     if (items.len == 1) return;
     e.cycle.* = null;
-    e.menu.* = .{ .items = items, .saved = saved, .shown_len = items[idx].len, .idx = idx };
+    e.menu.* = .{ .items = items, .saved = saved, .shown_len = items[idx].insert.len, .idx = idx };
 }
 
 fn menuMove(e: *Engine, dir: Dir) !void {
     const m = &e.menu.*.?;
     if (currentWord(e.line).len != m.shown_len) return accept(e);
     const next = nextIdx(m.idx, m.items.len, dir);
-    try e.line.replaceBack(m.shown_len, m.items[next]);
+    try e.line.replaceBack(m.shown_len, m.items[next].insert);
     m.idx = next;
-    m.shown_len = m.items[next].len;
+    m.shown_len = m.items[next].insert.len;
 }
 
 fn cancel(e: *Engine) !void {
@@ -196,7 +196,7 @@ fn clearRows(e: *Engine) !void {
     try e.term.write("\r\n\x1b[0J\x1b[A");
 }
 
-fn listComps(e: *Engine, items: []const []const u8) !void {
+fn listComps(e: *Engine, items: []const config.Candidate) !void {
     if (e.hidden) return;
     try e.term.write("\r\n");
     const shown = @min(items.len, e.cfg.max_listed);
@@ -206,8 +206,8 @@ fn listComps(e: *Engine, items: []const []const u8) !void {
     e.ml_row.* = 0;
 }
 
-fn listItem(e: *Engine, item: []const u8) !void {
-    try e.term.write(item);
+fn listItem(e: *Engine, c: config.Candidate) !void {
+    try e.term.write(c.insert);
     try e.term.write("   ");
 }
 
@@ -217,11 +217,19 @@ fn more(e: *Engine, n: usize) !void {
     try e.term.write(e.out.items);
 }
 
-fn menuRow(e: *Engine, item: []const u8, selected: bool) !void {
+fn menuRow(e: *Engine, c: config.Candidate, selected: bool) !void {
     const cells = if (e.term.cols > 4) e.term.cols - 4 else 1;
     if (selected) try e.out.appendSlice(e.alloc, "\x1b[7m");
     try e.out.appendSlice(e.alloc, " ");
-    try e.out.appendSlice(e.alloc, render.truncCells(item, cells));
+    const shown = render.truncCells(c.insert, cells);
+    try e.out.appendSlice(e.alloc, shown);
+    const used = unicode.strWidth(shown);
+    if (c.detail.len > 0 and cells > used + 2) {
+        // SGR 2/22 toggles dim without touching the selected row's inverse.
+        try e.out.appendSlice(e.alloc, "  \x1b[2m");
+        try e.out.appendSlice(e.alloc, render.truncCells(c.detail, cells - used - 2));
+        try e.out.appendSlice(e.alloc, "\x1b[22m");
+    }
     try e.out.appendSlice(e.alloc, " ");
     if (selected) try e.out.appendSlice(e.alloc, "\x1b[0m");
     try e.out.appendSlice(e.alloc, "\x1b[0K");
@@ -240,9 +248,10 @@ fn currentWord(line: *const Line) []const u8 {
     return head[s..];
 }
 
-fn longestPrefix(items: []const []const u8) []const u8 {
-    var p = items[0];
-    for (items[1..]) |s| {
+fn longestPrefix(items: []const config.Candidate) []const u8 {
+    var p = items[0].insert;
+    for (items[1..]) |c| {
+        const s = c.insert;
         var i: usize = 0;
         while (i < p.len and i < s.len and p[i] == s[i]) i += 1;
         p = p[0..utf8Boundary(p, i)];
@@ -256,14 +265,20 @@ fn utf8Boundary(s: []const u8, n: usize) usize {
     return end;
 }
 
+fn cands(comptime texts: []const []const u8) [texts.len]config.Candidate {
+    var out: [texts.len]config.Candidate = undefined;
+    inline for (texts, 0..) |t, i| out[i] = .{ .insert = t };
+    return out;
+}
+
 test "longest common prefix" {
-    const items = [_][]const u8{ "commit", "config", "checkout" };
+    const items = cands(&.{ "commit", "config", "checkout" });
     try std.testing.expectEqualStrings("c", longestPrefix(&items));
-    const two = [_][]const u8{ "config", "configure" };
+    const two = cands(&.{ "config", "configure" });
     try std.testing.expectEqualStrings("config", longestPrefix(&two));
-    const same_codepoint = [_][]const u8{ "éclair", "éon" };
+    const same_codepoint = cands(&.{ "éclair", "éon" });
     try std.testing.expectEqualStrings("é", longestPrefix(&same_codepoint));
-    const split_codepoint = [_][]const u8{ "éclair", "êwork" };
+    const split_codepoint = cands(&.{ "éclair", "êwork" });
     try std.testing.expectEqualStrings("", longestPrefix(&split_codepoint));
 }
 
@@ -458,15 +473,57 @@ test "menu drawing uses only relative cursor motion" {
     try std.testing.expect(std.mem.endsWith(u8, h.out.items, "\x1b[3A")); // 3 rows drawn
 }
 
+fn detailComps(
+    _: ?*anyopaque,
+    _: []const u8,
+    _: usize,
+    word: []const u8,
+    out: *config.Completions,
+) anyerror!void {
+    _ = word;
+    try out.addDetail("512x512", "balanced");
+    try out.addDetail("1024x1024", "detailed");
+}
+
+test "menu renders details dimmed and never inserts them" {
+    var h = try Harness.init(.menu);
+    defer h.deinit();
+    h.complete_cb = detailComps;
+    try h.line.setText("size ");
+    var e = h.engine();
+    try complete(&e);
+    try std.testing.expectEqualStrings("size 512x512", h.line.text()); // insert only
+    try writeMenu(&e);
+    const out = h.out.items;
+    const detail_at = std.mem.indexOf(u8, out, "balanced").?;
+    const dim_at = std.mem.indexOf(u8, out, "\x1b[2m").?;
+    try std.testing.expect(dim_at < detail_at);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\x1b[22m") != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.line.text(), "balanced") == null);
+    // The dim toggle sits inside the selected row's inverse span.
+    const sel_at = std.mem.indexOf(u8, out, "\x1b[7m").?;
+    const sel_end = std.mem.indexOf(u8, out, "\x1b[0m").?;
+    try std.testing.expect(sel_at < dim_at and dim_at < sel_end);
+}
+
+test "narrow terminals drop the detail before the insert text" {
+    var h = try Harness.init(.menu);
+    defer h.deinit();
+    h.complete_cb = detailComps;
+    h.term.cols = 14; // room for " 1024x1024 " but not the detail
+    try h.line.setText("size ");
+    var e = h.engine();
+    try complete(&e);
+    try writeMenu(&e);
+    try std.testing.expect(std.mem.indexOf(u8, h.out.items, "1024x1024") != null);
+    try std.testing.expect(std.mem.indexOf(u8, h.out.items, "detailed") == null);
+}
+
 test "the menu shows at most max_menu_rows rows" {
     var h = try Harness.init(.menu);
     defer h.deinit();
-    h.menu = .{
-        .items = &.{ "a", "b", "c", "d", "e", "f", "g", "h", "i", "j" },
-        .saved = "",
-        .shown_len = 1,
-        .idx = 0,
-    };
+    const ten = cands(&.{ "a", "b", "c", "d", "e", "f", "g", "h", "i", "j" });
+    h.menu = .{ .items = &ten, .saved = "", .shown_len = 1, .idx = 0 };
     var e = h.engine();
     try writeMenu(&e); // 10 candidates, default max_listed 100
     try std.testing.expect(std.mem.endsWith(u8, h.out.items, "\x1b[8A"));
