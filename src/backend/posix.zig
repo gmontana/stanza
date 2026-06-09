@@ -24,6 +24,7 @@ pub const Terminal = struct {
     out: Fd,
     orig: ?posix.termios = null,
     cols: usize = 80,
+    rows: usize = 24,
 
     pub fn init(in: Fd, out: Fd) Terminal {
         return .{ .in = in, .out = out };
@@ -89,26 +90,29 @@ pub const Terminal = struct {
     }
 
     pub fn updateSize(self: *Terminal) void {
-        self.cols = self.queryCols() catch 80;
-        if (self.cols == 0) self.cols = 80;
+        const corner = self.queryCorner() catch Pos{ .row = 24, .col = 80 };
+        self.rows = if (corner.row == 0) 24 else corner.row;
+        self.cols = if (corner.col == 0) 80 else corner.col;
     }
 
-    fn queryCols(self: *Terminal) !usize {
-        const start = try self.cursorCol();
-        try self.write("\x1b[999C");
-        const wide = try self.cursorCol();
-        if (wide > start) {
-            var back: [16]u8 = undefined;
-            try self.write(try std.fmt.bufPrint(&back, "\x1b[{d}D", .{wide - start}));
-        }
-        return wide;
+    /// Jump to the bottom-right corner (the terminal clamps the move), read
+    /// the cursor position there — that is the size — and jump back.
+    fn queryCorner(self: *Terminal) !Pos {
+        const start = try self.cursorPos();
+        try self.write("\x1b[999;999H");
+        const corner = try self.cursorPos();
+        var back: [24]u8 = undefined;
+        try self.write(try std.fmt.bufPrint(&back, "\x1b[{d};{d}H", .{ start.row, start.col }));
+        return corner;
     }
 
-    fn cursorCol(self: *Terminal) !usize {
+    fn cursorPos(self: *Terminal) !Pos {
         try self.write("\x1b[6n");
-        return readCol(self.in);
+        return readPos(self.in);
     }
 };
+
+const Pos = struct { row: usize, col: usize };
 
 pub fn read(fd: Fd, out: []u8) !usize {
     return posix.read(fd, out);
@@ -197,17 +201,27 @@ pub fn raiseStop() void {
     _ = posix.system.kill(posix.system.getpid(), posix.SIG.TSTP);
 }
 
-fn readCol(fd: Fd) !usize {
+fn readPos(fd: Fd) !Pos {
     var buf: [32]u8 = undefined;
     var n: usize = 0;
     while (n < buf.len) {
-        if (!readable(fd, 120)) break;
+        if (!readable(fd, 120)) break; // tty that ignores DSR: don't hang
         const r = read(fd, buf[n .. n + 1]) catch break;
         if (r == 0 or buf[n] == 'R') break;
         n += 1;
     }
-    const semi = std.mem.lastIndexOfScalar(u8, buf[0..n], ';') orelse return error.BadReply;
-    return parseNum(buf[semi + 1 .. n]);
+    return parsePos(buf[0..n]);
+}
+
+/// Parse the body of a cursor-position report, "ESC [ row ; col" (the final
+/// 'R' already consumed).
+fn parsePos(reply: []const u8) !Pos {
+    const semi = std.mem.lastIndexOfScalar(u8, reply, ';') orelse return error.BadReply;
+    const bracket = std.mem.lastIndexOfScalar(u8, reply[0..semi], '[') orelse return error.BadReply;
+    return .{
+        .row = parseNum(reply[bracket + 1 .. semi]),
+        .col = parseNum(reply[semi + 1 ..]),
+    };
 }
 
 fn parseNum(s: []const u8) usize {
@@ -231,11 +245,24 @@ test "resize handler sets the flag and resized() consumes it" {
     try std.testing.expect(!resized());
 }
 
-test "updateSize falls back to 80 columns without a valid DSR reply" {
+test "updateSize falls back to 80x24 without a valid DSR reply" {
     const dn = try devNull();
     defer close(dn);
     var t = Terminal.init(dn, dn);
     t.cols = 7;
+    t.rows = 3;
     t.updateSize();
     try std.testing.expectEqual(@as(usize, 80), t.cols);
+    try std.testing.expectEqual(@as(usize, 24), t.rows);
+}
+
+test "parsePos reads row and column from a DSR reply" {
+    const p = try parsePos("\x1b[12;80");
+    try std.testing.expectEqual(@as(usize, 12), p.row);
+    try std.testing.expectEqual(@as(usize, 80), p.col);
+    // Stray bytes before the report (a queued keypress) must not break it.
+    const q = try parsePos("x\x1b[3;9");
+    try std.testing.expectEqual(@as(usize, 3), q.row);
+    try std.testing.expectError(error.BadReply, parsePos("12;80")); // no CSI
+    try std.testing.expectError(error.BadReply, parsePos("\x1b[5"));
 }

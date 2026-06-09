@@ -163,6 +163,7 @@ pub const Terminal = struct {
     orig_cp: ?UINT = null,
     orig_out_cp: ?UINT = null,
     cols: usize = 80,
+    rows: usize = 24,
 
     pub fn init(in: Fd, out: Fd) Terminal {
         return .{ .in = in, .out = out };
@@ -280,10 +281,13 @@ pub const Terminal = struct {
         var info: CONSOLE_SCREEN_BUFFER_INFO = undefined;
         if (!GetConsoleScreenBufferInfo(self.out, &info).toBool()) {
             self.cols = 80;
+            self.rows = 24;
             return;
         }
         const width = @as(i32, info.srWindow.Right) - @as(i32, info.srWindow.Left) + 1;
+        const height = @as(i32, info.srWindow.Bottom) - @as(i32, info.srWindow.Top) + 1;
         self.cols = if (width > 0) @intCast(width) else 80;
+        self.rows = if (height > 0) @intCast(height) else 24;
     }
 };
 
