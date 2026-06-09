@@ -17,7 +17,7 @@ full grapheme-cluster editing.
 
 *Four scenes: ghost-text hints, Tab completion, Ctrl-R history search, and a
 vi-mode fix · the completion menu chaining command arguments on one line ·
-asynchronous output printing above the line being edited (`hide`/`show`) ·
+asynchronous output printing above the line being edited (`printAbove`) ·
 wrapped multi-line editing. Recorded with
 [`assets/demo.tape`](assets/demo.tape).*
 
@@ -34,7 +34,8 @@ wrapped multi-line editing. Recorded with
   append-merge for concurrent instances), navigable with Up/Down and
   searchable with **Ctrl-R** (reverse incremental search).
 - **Completion** — a line-aware `Tab` callback. Stanza can list candidates,
-  cycle through them, or keep a small selectable menu below the prompt.
+  cycle through them, or keep a small selectable menu below the prompt;
+  candidates can carry a dimmed annotation (`addDetail("512x512", "balanced")`).
 - **Hints** — dim ghost text after the cursor (e.g. suggest the rest of a word).
 - **Syntax highlighting** — a paint callback styles the line as you type.
 - **UTF-8 + display widths** — cursor motion, deletion, and rendering are
@@ -44,7 +45,8 @@ wrapped multi-line editing. Recorded with
 - **Single-line or wrapped** — a long line scrolls one row by default, or set
   `.multiline = true` to wrap it across rows.
 - **Resize aware** — hosts can notify the editor after a terminal resize; a
-  simple opt-in SIGWINCH handler is available on POSIX.
+  simple opt-in SIGWINCH handler is available on POSIX. The detected size is
+  exposed as `ed.term.cols`/`ed.term.rows` for hosts sizing their own output.
 - **Graceful fallback** — when stdin/stdout is not a terminal, it does a plain
   line read so pipelines keep working.
 - **Blocking or event-loop driven** — call `prompt`, or drive it from your own
