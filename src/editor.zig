@@ -256,6 +256,18 @@ pub const Editor = struct {
         }
     }
 
+    /// Print host output above the line being edited: erase the prompt,
+    /// write `bytes`, repaint. When no prompt is active — or the host hid it
+    /// explicitly with `hide` — the bytes are written as-is, so progress and
+    /// log lines can go through one call no matter the editor's state. Rows
+    /// must end in "\r\n" (raw mode does not translate bare newlines).
+    pub fn printAbove(self: *Editor, bytes: []const u8) !void {
+        const repaint = self.active and !self.hidden;
+        if (repaint) try self.hide();
+        try self.term.write(bytes);
+        if (repaint) try self.show();
+    }
+
     /// Clear the screen and repaint the prompt — what Ctrl-L does, as a
     /// public entry point for hosts that bind their own `clear` command.
     pub fn clearScreen(self: *Editor) !void {
@@ -1128,6 +1140,52 @@ test "hide erases the line, suppresses repaints, and show restores it" {
     const erase_at = try indexIn(got.items, "\r\x1b[J");
     const paint_at = try indexIn(got.items, "> abcx");
     try std.testing.expect(paint_at > erase_at); // repaint only after show()
+}
+
+test "printAbove erases, prints, and repaints in order" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [128]u8 = undefined;
+    const path = try tmpPath(&path_buf, &tmp, "above");
+    const out = try openWrite(path);
+    var ed = Editor.initFd(std.testing.allocator, .{}, sys.invalid, out);
+    defer ed.deinit();
+    ed.active = true; // as editStart would, without needing a real tty
+    ed.prompt_text = "> ";
+    try ed.line.setText("abc");
+    try ed.printAbove("job done\r\n");
+    try std.testing.expect(!ed.hidden); // visible again afterwards
+    sys.close(out);
+    var got: std.ArrayList(u8) = .empty;
+    defer got.deinit(std.testing.allocator);
+    try readBack(std.testing.allocator, path, &got);
+    const erase_at = try indexIn(got.items, "\r\x1b[J");
+    const text_at = try indexIn(got.items, "job done");
+    const paint_at = try indexIn(got.items, "> abc");
+    try std.testing.expect(erase_at < text_at and text_at < paint_at);
+}
+
+test "printAbove passes bytes through when inactive or explicitly hidden" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [128]u8 = undefined;
+    const path = try tmpPath(&path_buf, &tmp, "passthru");
+    const out = try openWrite(path);
+    var ed = Editor.initFd(std.testing.allocator, .{}, sys.invalid, out);
+    defer ed.deinit();
+    ed.prompt_text = "> ";
+    try ed.printAbove("between prompts\r\n"); // inactive: plain write
+    ed.active = true;
+    try ed.hide(); // host hid the prompt itself...
+    try ed.printAbove("while hidden\r\n");
+    try std.testing.expect(ed.hidden); // ...printAbove must not un-hide it
+    sys.close(out);
+    var got: std.ArrayList(u8) = .empty;
+    defer got.deinit(std.testing.allocator);
+    try readBack(std.testing.allocator, path, &got);
+    try std.testing.expect(std.mem.indexOf(u8, got.items, "between prompts") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got.items, "while hidden") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got.items, "> ") == null); // never repainted
 }
 
 test "multiline hide collapses to the block top first" {

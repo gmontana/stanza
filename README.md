@@ -49,9 +49,9 @@ wrapped multi-line editing. Recorded with
   line read so pipelines keep working.
 - **Blocking or event-loop driven** — call `prompt`, or drive it from your own
   event loop with `editStart` / `editFeed` / `editStop`.
-- **Async output above the prompt** — `hide()` erases the line being edited so
-  the host can print, `show()` repaints it; `clearScreen()` is the public
-  Ctrl-L.
+- **Async output above the prompt** — `printAbove()` prints host output above
+  the line being edited (built on `hide()`/`show()`); `clearScreen()` is the
+  public Ctrl-L.
 - **Job control** — Ctrl-Z restores the terminal and suspends (POSIX); on
   `fg` the editor re-enters raw mode and repaints the line as it was.
 - **Panic-safe restore** — `restoreTerminal()` is allocator-free and callable
@@ -220,16 +220,34 @@ while (true) {
 ```
 
 To print asynchronous output (log lines, job results) while a line is being
-edited, bracket it with `hide`/`show`:
+edited, use `printAbove` — it erases the prompt, writes your bytes, and
+repaints the line:
 
 ```zig
-try ed.hide(); // erase the prompt row(s)
-std.debug.print("event: build finished\r\n", .{});
-try ed.show(); // repaint the line being edited
+try ed.printAbove("event: build finished\r\n");
 ```
+
+It is state-aware, so the same call works everywhere: with no active prompt
+(or after an explicit `hide()`) it degrades to a plain write. For finer
+control, `hide()`/`show()` are the underlying pair. End rows with `\r\n`;
+raw mode does not translate bare newlines.
 
 See [`examples/async.zig`](examples/async.zig) (`zig build async`) for a runnable
 version with a clock that ticks above the prompt while you type.
+
+### Long-running commands
+
+A command handler that runs after `prompt` returns owns the terminal — print
+progress freely, no editor calls needed. Only output produced *while a prompt
+is live* (background jobs, event-loop ticks) needs `printAbove`:
+
+```zig
+while (running) {
+    if (job.poll()) |msg| try ed.printAbove(msg); // above the live prompt
+    if (!ed.waitInput(50)) continue;
+    switch (try ed.editFeed()) { ... }
+}
+```
 
 By default Stanza does not install signal handlers. If your program owns
 `SIGWINCH`, call `ed.notifyResize()` after observing a resize. For small CLI

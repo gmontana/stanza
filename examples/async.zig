@@ -3,7 +3,7 @@
 //!   zig build async
 //!
 //! It waits up to one second for input. On a timeout it prints a tick line
-//! *above* the prompt with `hide`/`show` — the pattern for any host that
+//! *above* the prompt with `printAbove` — the pattern for any host that
 //! emits asynchronous output while a line is being edited. On input it feeds
 //! the editor. Enter prints the line; Ctrl-D quits.
 
@@ -25,9 +25,9 @@ pub fn main() !void {
     while (true) {
         if (!ed.waitInput(1000)) {
             ticks += 1;
-            try ed.hide(); // erase the prompt row(s)...
-            try writeFmt(&ed, "tick: idle {d}s\r\n", .{ticks}); // ...print above them...
-            try ed.show(); // ...and repaint the line being edited
+            var buf: [64]u8 = undefined;
+            const msg = try std.fmt.bufPrint(&buf, "tick: idle {d}s\r\n", .{ticks});
+            try ed.printAbove(msg); // erase prompt, print, repaint the line
             continue;
         }
         switch (ed.editFeed() catch |err| switch (err) {
